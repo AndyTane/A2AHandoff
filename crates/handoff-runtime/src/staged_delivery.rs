@@ -97,6 +97,12 @@ fn deferred(
         }),
     );
 }
+/// How long an occupied input is left alone before the runtime would try again by itself.
+///
+/// Long on purpose: the box may be holding something the user is writing, so the retry must
+/// come from a deliberate click (`override_with_manual_send` clears this) rather than from the
+/// loop deciding the coast is clear.
+const OCCUPIED_INPUT_BACKOFF_MS: u64 = 30 * 60 * 1000;
 fn preparation_failed(w: &mut Value, problem: &str, error: &mut String) {
     let occupied =
         problem.starts_with("DRAFT_OCCUPIED") || problem == "EXISTING_ATTACHMENT_PRESERVED";
@@ -106,14 +112,23 @@ fn preparation_failed(w: &mut Value, problem: &str, error: &mut String) {
             "DRAFT_READBACK_CONFLICT" | "PLAIN_TEXT_INPUT_UNSUPPORTED"
         );
     if blocked {
-        w["pending"] = Value::Null;
-        w["phase"] = json!("hold_preparation");
-        *error = if occupied {
-            "目标输入框已有草稿，已保留；清空后再点发送。".into()
+        if occupied {
+            // The delivery is KEPT: an occupied input is the user's to clear, and dropping
+            // the pending left nothing to aim a retry at - the window could only say "clear
+            // the box" with no way to then continue. Retrying stays deliberate rather than
+            // automatic (the box may be holding the user's own writing), so the backoff is
+            // long and 「重试本次投递」 clears it.
+            w["pending"]["stage"] = json!("waiting_target");
+            w["pending"]["retry_after_ms"] = json!(now() + OCCUPIED_INPUT_BACKOFF_MS);
+            w["phase"] = json!("hold_preparation");
+            *error = "目标输入框已有草稿，已保留；清空后点「重试本次投递」。".into();
+            w["notice"] = json!(&*error);
         } else {
-            format!("输入框状态无法确认，已停止重试：{problem}")
-        };
-        w["notice"] = json!(&*error);
+            w["pending"] = Value::Null;
+            w["phase"] = json!("hold_preparation");
+            *error = format!("输入框状态无法确认，已停止重试：{problem}");
+            w["notice"] = json!(&*error);
+        }
     } else {
         w["pending"]["stage"] = json!("waiting_target");
         w["pending"]["retry_after_ms"] = json!(now() + 5000);
@@ -422,14 +437,36 @@ mod tests {
         assert!(accept_draft(&mut p, &receipt()).is_err());
     }
     #[test]
-    fn occupied_input_stops_without_consuming_reply() {
+    fn occupied_input_keeps_the_delivery_retryable() {
         let mut w =
             json!({"phase":"waiting_claude","pending":{"id":"test","stage":"queued"},"ledger":[]});
         let mut error = String::new();
+        let before = now();
         preparation_failed(&mut w, "DRAFT_OCCUPIED_PRESERVED", &mut error);
+        // Kept, not dropped: an empty pending left nothing for 「重试本次投递」 to aim at, and
+        // the result it carried would then need the source to be re-opened to be sendable.
+        assert_eq!(w["pending"]["id"], "test", "the delivery survives the hold");
+        assert_eq!(w["pending"]["stage"], "waiting_target");
+        assert!(number(&w["pending"], "retry_after_ms") >= before + OCCUPIED_INPUT_BACKOFF_MS);
+        assert_eq!(w["phase"], "hold_preparation");
+        assert_eq!(w["ledger"], json!([]), "nothing is consumed by a refusal");
+        assert!(error.contains("重试本次投递"), "got {error}");
+        // A manual click clears that backoff, which is what makes the button work.
+        let mut p = w["pending"].clone();
+        override_with_manual_send(&mut p);
+        assert!(yes(&p, "manual"));
+        assert_eq!(number(&p, "retry_after_ms"), 0);
+    }
+    #[test]
+    fn an_unreadable_input_still_clears_the_pending() {
+        // The other blocked reasons are not the user's to clear, so they keep the old
+        // behaviour: stop, drop the pending, and say so.
+        let mut w =
+            json!({"phase":"waiting_claude","pending":{"id":"test","stage":"queued"},"ledger":[]});
+        let mut error = String::new();
+        preparation_failed(&mut w, "DRAFT_READBACK_CONFLICT", &mut error);
         assert!(w["pending"].is_null());
         assert_eq!(w["phase"], "hold_preparation");
-        assert_eq!(w["ledger"], json!([]));
         assert!(!error.is_empty());
     }
     #[test]

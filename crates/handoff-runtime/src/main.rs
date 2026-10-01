@@ -277,6 +277,10 @@ fn override_with_manual_send(p: &mut Value) {
     p["manual"] = json!(true);
     p["dispatch_delay_seconds"] = json!(0);
     p["deadline_ms"] = json!(now());
+    // A click also clears any backoff the delivery was waiting out - e.g. an occupied target
+    // input that the user has now cleared. Without this the click would set a deadline that
+    // `drive` never reaches, and the button would look dead again.
+    p["retry_after_ms"] = json!(0);
 }
 fn restore_listener(w: &mut Value, d: &Value, c: &Value) {
     w["pending"] = Value::Null;

@@ -825,13 +825,23 @@ pub fn derive(s: &Snapshot, watch_alive: bool, notice: Option<&Notice>, now: u64
             title,
             desc,
             code: None,
-            buttons: vec![BannerButton {
-                id: ID_CANCEL,
-                label: "取消本次",
-                icon: None,
-                ghost: false,
-                enabled: true,
-            }],
+            buttons: {
+                let mut b = vec![BannerButton {
+                    id: ID_CANCEL,
+                    label: "取消本次",
+                    icon: None,
+                    ghost: false,
+                    enabled: true,
+                }];
+                // A delivery held because the target input was occupied is still queued, so it
+                // can go as soon as the user clears the box. The runtime keeps the pending for
+                // exactly this (`preparation_failed`) and a click clears the backoff it was
+                // waiting out - without the button the only way on was 取消本次 or 监听.
+                if phase == "hold_preparation" {
+                    b.insert(0, retry_button());
+                }
+                b
+            },
         }
     } else if sending {
         Banner {
@@ -2213,6 +2223,52 @@ mod tests {
         // Every other hold keeps the bare code and adds nothing.
         let other = hold("本次已停止：DRAFT_WRITE_UNVERIFIED");
         assert!(other.desc.is_empty(), "got '{}'", other.desc);
+    }
+    /// A delivery held because the target input was occupied is still queued, so the same
+    /// retry button must be offered there - that is the case with nothing else to press.
+    #[test]
+    fn a_queued_delivery_held_on_an_occupied_input_offers_a_retry() {
+        let held = |phase: &str, pending: bool| {
+            let mut s = Snapshot::for_demo("running");
+            s.demo = None;
+            s.live = json!({"mode":"live","phase":phase,"sending":false,
+                "pending": if pending { json!({"id":"p","direction":"DSH_TO_CLAUDE","stage":"waiting_target","deadline_ms":0}) } else { json!(null) },
+                "claude_ok":true,"dsh_ok":true,
+                "status_text":"交接暂缓，等待核验",
+                "detail":"目标输入框已有草稿，已保留；清空后点「重试本次投递」。",
+                "last_delivery":{"state":"sent","direction":"DSH_TO_CLAUDE"},
+                "next_poll_at_ms":0});
+            derive(&s, true, None, 1_000).banner
+        };
+        let ids = held("hold_preparation", true)
+            .buttons
+            .iter()
+            .map(|b| b.id)
+            .collect::<Vec<_>>();
+        assert!(
+            ids.contains(&ID_BANNER_RETRY),
+            "an occupied input with a queued delivery must offer a retry, got {ids:?}"
+        );
+        // Without a pending there is nothing to retry, so no button.
+        let ids = held("hold_preparation", false)
+            .buttons
+            .iter()
+            .map(|b| b.id)
+            .collect::<Vec<_>>();
+        assert!(
+            !ids.contains(&ID_BANNER_RETRY),
+            "nothing queued means nothing to retry, got {ids:?}"
+        );
+        // And an ordinary waiting phase offers the usual pair only.
+        let ids = held("waiting_claude", true)
+            .buttons
+            .iter()
+            .map(|b| b.id)
+            .collect::<Vec<_>>();
+        assert!(
+            !ids.contains(&ID_BANNER_RETRY),
+            "only a hold offers the retry, got {ids:?}"
+        );
     }
     #[test]
     fn unbound_claude_card() {
