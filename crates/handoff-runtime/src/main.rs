@@ -376,12 +376,15 @@ fn consume(w: &mut Value, p: &Value) {
         w["claude_floor"] = p["source_seq"].clone();
     }
 }
-/// Finishes a decision an older build left half-made.
+/// Finishes a decision an older build left half-made: consuming the source of a delivery that
+/// the human took over.
 ///
-/// `superseded_by_user` used to be recorded without consuming the source, which left such a
-/// result on offer forever (caught by tests/test-runtime-coherence.ps1: "a completed result
-/// is either delivered or pending"). The decision itself is not in question - the record
-/// already says the draft will never be sent - so the source is consumed once, here.
+/// Only a CONFIRMED delivery is consumed (`sent`). The human taking over says nothing about
+/// whether the message went out - `send_attempted` and `submit_uncertain` are unconfirmed, and
+/// `draft_unverified` / `cancelled_before_send` never left at all - so consuming those dropped
+/// a round the user could still have sent with one click, silently. Leaving them on offer costs
+/// nothing: the phase is already `paused_by_user`, so nothing auto-sends, and the record is kept
+/// for a deliberate click (the auto path stays blocked by `abandoned`).
 fn reconcile_superseded(home: &Path, w: &mut Value) {
     if !w["pending"].is_null() || text(&w["last_delivery"], "state") != "superseded_by_user" {
         return;
@@ -394,6 +397,9 @@ fn reconcile_superseded(home: &Path, w: &mut Value) {
     let Some(entry) = entry else {
         return;
     };
+    if text(&entry, "state") != "sent" {
+        return;
+    }
     let before = (number(w, "dsh_after_seq"), number(w, "claude_floor"));
     consume(w, &entry);
     if before != (number(w, "dsh_after_seq"), number(w, "claude_floor")) {
@@ -1326,14 +1332,15 @@ fn entry() -> Result<(), String> {
             }
         }
         if text(&w, "phase") == "hold_send_uncertain" && manual_changed(&w, &d, &c) {
-            let abandoned = w["pending"].clone();
             w["last_delivery"]["previous_state"] = w["last_delivery"]["state"].clone();
             w["last_delivery"]["state"] = json!("superseded_by_user");
             w["phase"] = json!("paused_by_user");
             w["pending"] = Value::Null;
-            // The draft will never be sent, so the source it carried is consumed now - see
-            // `consume`.
-            consume(&mut w, &abandoned);
+            // The source is NOT consumed here. Taking the conversation over says nothing about
+            // whether the message went out, and this state is reached precisely when it is not
+            // confirmed: consuming it dropped a round the user could still send with one click.
+            // What keeps it from auto-sending is `abandoned`, not the watermark - and the record
+            // stays on offer for a deliberate click.
             w["notice"] = json!("会话已由人工推进；旧稿不再回发，原始回执保留");
             error.clear();
             diagnostic(
@@ -1878,31 +1885,52 @@ mod live_tests {
         consume(&mut w2, &Value::Null);
         assert_eq!(w2["claude_floor"], before);
     }
-    /// A record an older build left half-made is finished once at startup, and never
-    /// touches a source a live pending still owns.
+    /// Only a CONFIRMED delivery is consumed when the human takes over.
+    ///
+    /// The record says the draft will not be sent again, but not that it went out: this state
+    /// is reached precisely when it did not. Consuming it dropped a round the user could still
+    /// send with one click, and nothing in the window said so.
     #[test]
-    fn a_superseded_record_is_consumed_once() {
+    fn a_superseded_record_is_not_consumed_without_proof_of_delivery() {
         let home = std::env::temp_dir().join(format!("a2a-superseded-{}", std::process::id()));
         fs::create_dir_all(&home).unwrap();
 
-        let mut w = json!({
+        // Unconfirmed and never-sent states stay on offer.
+        for state in [
+            "send_attempted",
+            "submit_uncertain",
+            "draft_unverified",
+            "cancelled_before_send",
+        ] {
+            let mut w = json!({
+                "dsh_after_seq": 13872,
+                "claude_floor": 0,
+                "pending": null,
+                "last_delivery": {"id":"old","direction":"DSH_TO_CLAUDE","state":"superseded_by_user"},
+                "ledger": [{"id":"old","direction":"DSH_TO_CLAUDE","state":state,"source_seq":14646}]
+            });
+            reconcile_superseded(&home, &mut w);
+            assert_eq!(
+                number(&w, "dsh_after_seq"),
+                13872,
+                "{state} is not proof of delivery, so the source must stay on offer"
+            );
+        }
+
+        // A delivery the receipt confirms as sent is consumed, once, as before.
+        let mut confirmed = json!({
             "dsh_after_seq": 13872,
             "claude_floor": 0,
             "pending": null,
             "last_delivery": {"id":"old","direction":"DSH_TO_CLAUDE","state":"superseded_by_user"},
-            "ledger": [{"id":"old","direction":"DSH_TO_CLAUDE","state":"send_attempted","source_seq":14646}]
+            "ledger": [{"id":"old","direction":"DSH_TO_CLAUDE","state":"sent","source_seq":14646}]
         });
-        reconcile_superseded(&home, &mut w);
-        assert_eq!(
-            number(&w, "dsh_after_seq"),
-            14646,
-            "the abandoned source must be consumed"
-        );
-
+        reconcile_superseded(&home, &mut confirmed);
+        assert_eq!(number(&confirmed, "dsh_after_seq"), 14646);
         // Idempotent: the next start finds nothing left to finish.
-        let after = w["dsh_after_seq"].clone();
-        reconcile_superseded(&home, &mut w);
-        assert_eq!(w["dsh_after_seq"], after);
+        let after = confirmed["dsh_after_seq"].clone();
+        reconcile_superseded(&home, &mut confirmed);
+        assert_eq!(confirmed["dsh_after_seq"], after);
 
         // A live pending owns its source; reconciliation must not steal it.
         let mut held = json!({
