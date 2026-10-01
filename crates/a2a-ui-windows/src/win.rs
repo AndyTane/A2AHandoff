@@ -752,6 +752,15 @@ impl App {
         }
         for (&id, &h) in &self.controls {
             if specs.iter().any(|c| c.id == id) {
+                // A control that leaves the spec set is hidden, and it has to come back when
+                // the state brings it back. `hidden` was only ever inserted into, so every
+                // control that had once disappeared stayed invisible for the rest of the
+                // session - the banner's 重试本次投递 vanished after a queued-delivery banner
+                // (which offers 取消本次 instead) replaced the hold, and never returned.
+                if self.hidden.remove(&id) {
+                    let _ = ShowWindow(h, SW_SHOW);
+                    let _ = InvalidateRect(Some(h), None, false);
+                }
                 continue;
             }
             if self.hidden.insert(id) {
