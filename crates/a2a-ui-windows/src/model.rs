@@ -324,12 +324,17 @@ mod tests {
         )
         .unwrap();
         request_command(&d, "poll_now").unwrap();
+        // The retry button's command must be on this list too: a command the window refuses
+        // to emit looks exactly like a dead button ("操作未提交 / 不支持的操作").
+        request_command(&d, "retry_delivery").unwrap();
         let dir = d.join("runtime/commands");
         let files: Vec<_> = fs::read_dir(&dir).unwrap().filter_map(Result::ok).collect();
-        assert_eq!(files.len(), 1, "exactly one command file");
+        assert_eq!(files.len(), 2, "one command file per accepted command");
         let cmd = read_json(&files[0].path()).unwrap();
         assert_eq!(cmd["command"], "poll_now");
         assert_eq!(cmd["bindings"]["claude_session"], "cse_x");
+        let retry = read_json(&files[1].path()).unwrap();
+        assert_eq!(retry["command"], "retry_delivery");
         // Nothing else may be emitted: no pending request, no config write.
         assert!(!d.join("runtime/requests").exists());
         assert!(!d.join("runtime/config.json").exists());
@@ -391,6 +396,7 @@ pub fn request_command(product: &Path, command: &str) -> Result<(), String> {
         "cancel",
         "restore_listener",
         "poll_now",
+        "retry_delivery",
     ]
     .contains(&command)
     {
