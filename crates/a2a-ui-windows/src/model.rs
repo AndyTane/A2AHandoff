@@ -152,6 +152,11 @@ pub struct Snapshot {
     pub watch_session_matches: bool,
     pub reply_turn: Option<u64>,
     pub receipt_state: String,
+    /// The runtime's own notice for the last thing it did. It is the only place some verdicts
+    /// appear - 「绑定已变化，请重新点击。」, 「本次已经排队，无需重复点击」, 「上一笔不是未送达的草稿，
+    /// 未重试」 - so the window reads it and shows it when it changes; without that, a refused
+    /// click and a dead button look exactly alike.
+    pub runtime_notice: String,
     pub runtime_age: Option<u64>,
     pub poll_minutes: u64,
     pub poll_seconds: u64,
@@ -195,6 +200,7 @@ impl Snapshot {
             watch_session_matches: matches,
             reply_turn: live["reply_turn"].as_u64(),
             receipt_state: str_field(&live["last_delivery"], "state"),
+            runtime_notice: str_field(&live, "notice"),
             runtime_age: age_seconds(&path),
             poll_minutes: minutes_from_seconds(cfg["poll_seconds"].as_u64().unwrap_or(60)),
             poll_seconds: cfg["poll_seconds"].as_u64().unwrap_or(60).max(1),
@@ -260,6 +266,7 @@ impl Snapshot {
                 Value::Null
             },
             config_available: true,
+            runtime_notice: String::new(),
             demo: Some(name.into()),
             demo_deadline_ms: if name == "countdown" {
                 Some(now_ms() + 10_000)

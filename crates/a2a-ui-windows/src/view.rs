@@ -1029,10 +1029,24 @@ pub fn derive(s: &Snapshot, watch_alive: bool, notice: Option<&Notice>, now: u64
             buttons: vec![poll_button()],
         }
     } else {
+        // The runtime's own words when it has any. This branch used to assert 「自动交接已关闭」
+        // unconditionally, which was wrong whenever the runtime was still driving something -
+        // e.g. a delivery held on an occupied input, retried every few seconds - and it is the
+        // kind of claim the reader has no way to check.
+        let said = live_str(s, "status_text");
+        let said_detail = live_str(s, "detail");
         Banner {
             variant: Variant::Neutral,
-            title: "自动交接已关闭".into(),
-            desc: "使用卡片里的按钮手动发送".into(),
+            title: if said.is_empty() {
+                "自动交接已关闭".to_owned()
+            } else {
+                said.to_owned()
+            },
+            desc: if said_detail.is_empty() {
+                "使用卡片里的按钮手动发送".to_owned()
+            } else {
+                said_detail.to_owned()
+            },
             code: None,
             buttons: vec![poll_button()],
         }
@@ -2167,19 +2181,33 @@ mod tests {
     fn transient_notice_no_longer_hides_the_states_action_buttons() {
         let mut s = live(json!({}));
         s.live["enabled"] = json!(false);
+        // The runtime's own wording wins over the fallback: it says 暂停, and asserting 关闭
+        // here would be the window inventing a state the runtime never reported.
+        s.live["status_text"] = json!("自动交接已暂停");
+        s.live["detail"] = json!("监听继续；手动发送仍可用。");
         let base = derive(&s, true, None, 1_000).banner;
-        assert_eq!(base.title, "自动交接已关闭");
+        assert_eq!(base.title, "自动交接已暂停");
+        assert_eq!(base.desc, "监听继续；手动发送仍可用。");
         assert_eq!(
             base.buttons.iter().map(|x| x.id).collect::<Vec<_>>(),
             vec![ID_BANNER_POLL]
         );
+        // With nothing to report the fallback stays, so the banner is never blank.
+        let mut blank = live(json!({}));
+        blank.live["enabled"] = json!(false);
+        blank.live["status_text"] = json!("");
+        blank.live["detail"] = json!("");
+        let quiet = derive(&blank, true, None, 1_000).banner;
+        assert_eq!(quiet.title, "自动交接已关闭");
+        assert_eq!(quiet.desc, "使用卡片里的按钮手动发送");
+
         let n = Notice {
             variant: Variant::Info,
-            title: "操作已提交".into(),
-            detail: "运行器将核验会话后执行。".into(),
+            title: "已提交点击".into(),
+            detail: "等待运行器处理；它的结论会显示在这里。".into(),
         };
         let with = derive(&s, true, Some(&n), 1_000).banner;
-        assert_eq!(with.title, "操作已提交");
+        assert_eq!(with.title, "已提交点击");
         assert_eq!(
             with.buttons.iter().map(|x| x.id).collect::<Vec<_>>(),
             vec![ID_BANNER_POLL],

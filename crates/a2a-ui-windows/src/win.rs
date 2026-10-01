@@ -145,6 +145,27 @@ fn fit_dpi(real: u32, work_width: i32) -> u32 {
     (scaled as u32).clamp(96, real)
 }
 
+/// The runtime's notice, when it has changed since the last read.
+///
+/// The window's own answer to a click can only say "submitted"; the runtime's verdict lands in
+/// its `notice` field and nothing used to read it - so a refused click ("绑定已变化，请重新点击。",
+/// "本次已经排队，无需重复点击", "上一笔不是未送达的草稿，未重试") was indistinguishable from a dead
+/// button. The first read only seeds the value, so restarting does not replay an old notice.
+fn newly_reported(seen: &mut Option<String>, incoming: &str) -> Option<String> {
+    match seen {
+        // First read only seeds the value: a restart must not replay an old notice.
+        None => {
+            *seen = Some(incoming.to_owned());
+            None
+        }
+        Some(prev) if prev == incoming => None,
+        Some(_) => {
+            *seen = Some(incoming.to_owned());
+            (!incoming.is_empty()).then(|| incoming.to_owned())
+        }
+    }
+}
+
 /// How long to wait before starting another runtime, per consecutive failure.
 ///
 /// Short at first so a one-off death costs seconds, then long enough that a runtime which
@@ -528,6 +549,8 @@ struct App {
     hover: usize,
     spinning: bool,
     started: Instant,
+    /// Last runtime notice shown, so the same one is not repeated every read.
+    seen_notice: Option<String>,
     /// The runtime this window owns, once started. Held here (not in `run`) so the window
     /// can start a new one if it dies - see `ensure_runtime`.
     runtime: Option<RuntimeOwner>,
@@ -594,6 +617,7 @@ impl App {
             hover: 0,
             spinning: false,
             started: Instant::now(),
+            seen_notice: None,
             runtime: None,
             respawn_failures: 0,
             respawn_at: None,
@@ -864,8 +888,12 @@ impl App {
             let updated = Snapshot::load(&self.product);
             let alive = runtime_process_alive(updated.watch_pid);
             let interval_changed = updated.poll_minutes != self.snapshot.poll_minutes;
+            let reported = newly_reported(&mut self.seen_notice, &updated.runtime_notice);
             self.snapshot = updated;
             self.watcher_alive = alive;
+            if let Some(n) = reported {
+                self.say(Variant::Info, "运行器", &n);
+            }
             if interval_changed && !self.editing {
                 self.poll_input = self
                     .snapshot
@@ -1046,7 +1074,16 @@ impl App {
                     _ => "cancel",
                 };
                 match model::request_command(&self.product, command) {
-                    Ok(()) => self.say(Variant::Info, "操作已提交", "运行器将核验会话后执行。"),
+                    // Only the handover of the click is known here; what the runtime does with it
+                    // arrives a moment later as its own notice, which is shown when it changes.
+                    // Answering 「操作已提交 / 运行器将核验会话后执行。」 for every command was a
+                    // promise the window could not keep - the runtime refuses some clicks
+                    // outright (绑定已变化 / 已经排队 / 上一笔不是未送达的草稿).
+                    Ok(()) => self.say(
+                        Variant::Info,
+                        "已提交点击",
+                        "等待运行器处理；它的结论会显示在这里。",
+                    ),
                     Err(e) => self.say(Variant::Error, "操作未提交", &e),
                 }
             }
@@ -2663,6 +2700,37 @@ mod fit_tests {
         assert!(small >= crate::view::px(crate::view::DEFAULT_WIDTH, 96));
     }
 
+    /// The runtime's verdict must reach the window exactly once per change.
+    ///
+    /// The window can only say "click submitted"; what the runtime decided lands in its
+    /// `notice`, and nothing read that field until now. A refusal ("绑定已变化，请重新点击。") and a
+    /// dead button were therefore indistinguishable.
+    #[test]
+    fn a_runtime_notice_is_shown_once_per_change() {
+        let mut seen = None;
+        // The first read only seeds, so a restart does not replay an old notice.
+        assert_eq!(
+            newly_reported(&mut seen, "已核验发送回执；等待对方新回复"),
+            None
+        );
+        // The same value is not repeated on every poll.
+        assert_eq!(
+            newly_reported(&mut seen, "已核验发送回执；等待对方新回复"),
+            None
+        );
+        // A new verdict is reported once...
+        assert_eq!(
+            newly_reported(&mut seen, "绑定已变化，请重新点击。"),
+            Some("绑定已变化，请重新点击。".to_owned())
+        );
+        assert_eq!(newly_reported(&mut seen, "绑定已变化，请重新点击。"), None);
+        // ...and clearing it is silent, but does not swallow the next one.
+        assert_eq!(newly_reported(&mut seen, ""), None);
+        assert_eq!(
+            newly_reported(&mut seen, "本次已经排队，无需重复点击"),
+            Some("本次已经排队，无需重复点击".to_owned())
+        );
+    }
     /// The respawn backoff starts short and grows to a cap: a one-off death should cost
     /// seconds, but a runtime that dies on every start must not spin the machine.
     #[test]

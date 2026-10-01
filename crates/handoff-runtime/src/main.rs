@@ -931,6 +931,25 @@ fn commit_receipt(w: &mut Value, p: &Value, r: &Value) {
         return;
     }
     let a = &r["anchor"];
+    // The watermark this delivery lands on must be IN the receipt. `number()`/`text()` answer 0
+    // and "" for a missing key, so an anchor of the wrong shape recorded `sent` and then zeroed
+    // the watermarks: every older message re-opened, and `manual_changed` fired on the next tick
+    // (「自动交接已暂停 · 监听仍在」) with no error anywhere. Unverified means unconfirmed: hold
+    // rather than claim a delivery whose landing place is unknown.
+    let landing = if text(p, "direction") == "DSH_TO_CLAUDE" {
+        a.get("claude_user_index").is_some_and(Value::is_number)
+            && !text(a, "claude_user_hash").is_empty()
+    } else {
+        a.get("dsh_user_seq").is_some_and(Value::is_number)
+            && a.get("dsh_answer_seq").is_some_and(Value::is_number)
+    };
+    if !landing {
+        w["last_delivery"]["state"] = json!("submit_uncertain");
+        w["last_delivery"]["previous_state"] = json!("sent");
+        w["phase"] = json!("hold_send_uncertain");
+        w["notice"] = json!("回执缺少落点信息，未确认投递；不会盲目重发");
+        return;
+    }
     if text(p, "direction") == "DSH_TO_CLAUDE" {
         w["dsh_after_seq"] = p["source_seq"].clone();
         w["claude_anchor_index"] = a["claude_user_index"].clone();
@@ -1473,6 +1492,62 @@ mod live_tests {
         assert_ne!(hash("A\nB"), hash("A\nC"), "a changed word is a change");
         assert_ne!(hash("A\nB"), hash("A B"), "a missing line is a change");
         assert_ne!(hash("A\nB"), hash("ab"), "case is a change");
+    }
+    /// A receipt that does not say WHERE the delivery landed must not be recorded as sent.
+    #[test]
+    fn a_receipt_without_its_landing_place_is_not_sent() {
+        let (b, d, c, mut w) = fixture();
+        adopt(&mut w, &d, &c, "DSH_TO_CLAUDE");
+        let p = candidate_for(
+            &MessageTemplates::default(),
+            &w,
+            &b,
+            &d,
+            &c,
+            0,
+            true,
+            Some("DSH_TO_CLAUDE"),
+        )
+        .unwrap();
+        // The right shape: recorded as sent, and the watermarks move with it.
+        let mut good = w.clone();
+        commit_receipt(
+            &mut good,
+            &p,
+            &json!({"state":"sent","anchor":{"claude_user_index":9,"claude_user_hash":"h"}}),
+        );
+        assert_eq!(good["phase"], "waiting_claude");
+        assert_eq!(number(&good, "claude_floor"), 9);
+
+        // Missing the hash: held, no watermark moves, and the record says why.
+        let before = number(&w, "claude_floor");
+        let mut bad = w.clone();
+        commit_receipt(
+            &mut bad,
+            &p,
+            &json!({"state":"sent","anchor":{"claude_user_index":9}}),
+        );
+        assert_eq!(bad["phase"], "hold_send_uncertain");
+        assert_eq!(bad["last_delivery"]["state"], "submit_uncertain");
+        assert_eq!(
+            number(&bad, "claude_floor"),
+            before,
+            "no watermark may move"
+        );
+        assert!(
+            text(&bad, "notice").contains("落点"),
+            "{}",
+            text(&bad, "notice")
+        );
+
+        // The other direction needs both DSH watermarks.
+        let mut to_dsh = w.clone();
+        commit_receipt(
+            &mut to_dsh,
+            &json!({"id":"x","direction":"CLAUDE_TO_DSH","source_seq":3}),
+            &json!({"state":"sent","anchor":{"dsh_user_seq":5}}),
+        );
+        assert_eq!(to_dsh["phase"], "hold_send_uncertain");
     }
     /// A round that was never handed over must not be described as delivered.
     ///
