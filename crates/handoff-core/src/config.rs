@@ -547,37 +547,88 @@ pub fn bindings_are_placeholder(value: &Value) -> bool {
     c == PLACEHOLDER_CLAUDE_SESSION || d == PLACEHOLDER_DSH_SESSION
 }
 
+/// The marker that identifies the DSH entry script inside one argument.
+const DSH_ENTRY: &str = r"\runtime\node_modules\@deepseek-ai\dsh\lib\bin.js";
+
+/// The install root of the DSH process described by a `node.exe` command line, or `None` when
+/// the line is not one.
+///
+/// The process carries its paths on its own command line, and the node.exe running it is
+/// normally an absolute path too:
+///
+/// ```text
+/// "C:\Program Files\nodejs\node.exe" D:\apps\dsh\runtime\node_modules\@deepseek-ai\dsh\lib\bin.js web
+/// ```
+///
+/// Scanning that for the first drive-lettered path and stretching it to the marker captures
+/// node's own path, the quote between the two arguments and everything up to the marker, which
+/// is not a path at all - first-run detection then quietly found nothing on a machine whose DSH
+/// is launched by an absolute node path. Split the line into arguments the way Windows does and
+/// test each one on its own. `scripts/dsh-detect.ps1` implements the same rule for bootstrap,
+/// and both test suites use the same fixtures so a divergence fails on one side.
+pub fn dsh_install_root(command_line: &str) -> Option<String> {
+    for (index, segment) in command_line.split('"').enumerate() {
+        // Odd segments sit between quotes, so each is exactly one argument and may contain
+        // spaces. The even segments are the unquoted runs, which Windows splits on whitespace.
+        let tokens: Vec<&str> = if index % 2 == 1 {
+            vec![segment]
+        } else {
+            segment.split_whitespace().collect()
+        };
+        for token in tokens {
+            if let Some(root) = dsh_root_from_argument(token) {
+                return Some(root.to_owned());
+            }
+        }
+    }
+    None
+}
+
+fn dsh_root_from_argument(argument: &str) -> Option<&str> {
+    // Windows paths are case-insensitive, so compare folded. ASCII folding keeps the byte
+    // length, which is what makes the slice below land on a character boundary.
+    if !argument.to_ascii_lowercase().ends_with(DSH_ENTRY) {
+        return None;
+    }
+    let root = &argument[..argument.len() - DSH_ENTRY.len()];
+    let bytes = root.as_bytes();
+    let drive_rooted =
+        bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\';
+    if !drive_rooted {
+        return None;
+    }
+    Some(root)
+}
+
 /// Find a running DSH install by scanning node.exe command lines, the same way
 /// `scripts/bootstrap.ps1` does. Returns the first usable data directory.
 #[cfg(windows)]
 pub fn detect_dsh() -> Option<DetectedDsh> {
-    const PATTERN: &str =
-        r"(?i)([A-Z]:\\.+?)\\runtime\\node_modules\\@deepseek-ai\\dsh\\lib\\bin\.js";
-    let script = format!(
-        r#"$ErrorActionPreference='SilentlyContinue'
-Get-CimInstance Win32_Process -Filter "Name='node.exe'" | ForEach-Object {{
-  $c = [string]$_.CommandLine
-  if ($c -match '{PATTERN}') {{
-    $home = Join-Path $Matches[1] 'data'
-    if (Test-Path (Join-Path $home 'storages\session_projcache\sessions')) {{ $home }}
-  }}
-}} | Select-Object -First 1"#
-    );
+    // PowerShell only fetches the command lines. The parsing rule stays above, where it can be
+    // tested without a running DSH.
+    let script = r#"$ErrorActionPreference='SilentlyContinue'
+Get-CimInstance Win32_Process -Filter "Name='node.exe'" | ForEach-Object { [string]$_.CommandLine }"#;
     let out = std::process::Command::new("powershell.exe")
         .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"])
-        .arg(&script)
+        .arg(script)
         .output()
         .ok()?;
     if !out.status.success() {
         return None;
     }
     let text = String::from_utf8_lossy(&out.stdout);
-    let home = text.lines().map(str::trim).find(|l| !l.is_empty())?;
-    let data_home = validate_dsh_data_home(Path::new(home)).ok()?;
-    Some(DetectedDsh {
-        data_home,
-        origin: None,
-    })
+    for line in text.lines() {
+        let Some(root) = dsh_install_root(line) else {
+            continue;
+        };
+        if let Ok(data_home) = validate_dsh_data_home(&Path::new(&root).join("data")) {
+            return Some(DetectedDsh {
+                data_home,
+                origin: None,
+            });
+        }
+    }
+    None
 }
 
 #[cfg(not(windows))]
@@ -1001,5 +1052,42 @@ mod tests {
         assert!(is_placeholder_binding(PLACEHOLDER_CLAUDE_SESSION, "cse_"));
         assert!(is_placeholder_binding(PLACEHOLDER_DSH_SESSION, "session-"));
         assert!(!is_placeholder_binding("cse_real_123", "cse_"));
+    }
+
+    // The same fixtures appear in tests/test-bootstrap-firstrun.ps1, so the PowerShell rule in
+    // scripts/dsh-detect.ps1 and this one cannot drift apart unnoticed.
+
+    #[test]
+    fn a_quoted_node_path_does_not_swallow_the_dsh_root() {
+        let spaced = r#""C:\Program Files\nodejs\node.exe" D:\apps\dsh\runtime\node_modules\@deepseek-ai\dsh\lib\bin.js web --host 127.0.0.1 --port 3080"#;
+        assert_eq!(dsh_install_root(spaced).as_deref(), Some(r"D:\apps\dsh"));
+        let plain = r#""C:\nodejs\node.exe" D:\apps\dsh\runtime\node_modules\@deepseek-ai\dsh\lib\bin.js web"#;
+        assert_eq!(dsh_install_root(plain).as_deref(), Some(r"D:\apps\dsh"));
+    }
+
+    #[test]
+    fn the_dsh_entry_may_be_the_quoted_argument() {
+        let line = r#"node "D:\apps\dsh\runtime\node_modules\@deepseek-ai\dsh\lib\bin.js" web"#;
+        assert_eq!(dsh_install_root(line).as_deref(), Some(r"D:\apps\dsh"));
+    }
+
+    #[test]
+    fn neither_argument_needs_quoting() {
+        let line =
+            r"D:\nodejs\node.exe D:\apps\dsh\runtime\node_modules\@deepseek-ai\dsh\lib\bin.js web";
+        assert_eq!(dsh_install_root(line).as_deref(), Some(r"D:\apps\dsh"));
+    }
+
+    #[test]
+    fn another_dsh_process_is_not_the_install_root() {
+        let runner = r#""C:\Program Files\nodejs\node.exe" D:\apps\dsh\runtime\node_modules\@deepseek-ai\dsh-subprocess-local\lib\runner.js -- cmd"#;
+        assert_eq!(dsh_install_root(runner), None);
+        assert_eq!(dsh_install_root(""), None);
+    }
+
+    #[test]
+    fn a_relative_entry_script_is_not_an_install_root() {
+        let line = r"node runtime\node_modules\@deepseek-ai\dsh\lib\bin.js web";
+        assert_eq!(dsh_install_root(line), None);
     }
 }

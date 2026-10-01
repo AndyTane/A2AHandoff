@@ -11,22 +11,16 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+. (Join-Path $PSScriptRoot 'dsh-detect.ps1')
 
 $product = Split-Path $PSScriptRoot -Parent
 $runtime = Join-Path $product 'runtime'
 New-Item -ItemType Directory -Force $runtime | Out-Null
 
 if ([string]::IsNullOrWhiteSpace($DshDataHome)) {
-    foreach ($proc in @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue)) {
-        $cmd = [string]$proc.CommandLine
-        if ($cmd -match '(?i)([A-Z]:\\.+?)\\runtime\\node_modules\\@deepseek-ai\\dsh\\lib\\bin\.js') {
-            $candidate = Join-Path $Matches[1] 'data'
-            if (Test-Path (Join-Path $candidate 'storages\session_projcache\sessions')) {
-                $DshDataHome = $candidate
-                break
-            }
-        }
-    }
+    $lines = @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
+        ForEach-Object { [string]$_.CommandLine })
+    $DshDataHome = Get-DshDataHomeFromCommandLines $lines
 }
 if ([string]::IsNullOrWhiteSpace($DshDataHome)) {
     throw 'DSH data directory was not detected. Re-run with -DshDataHome <path> or set A2A_DSH_DATA_HOME.'

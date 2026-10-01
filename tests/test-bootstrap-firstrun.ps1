@@ -1,4 +1,4 @@
-﻿# First-run / bootstrap tests.
+# First-run / bootstrap tests.
 #
 # scripts/bootstrap.ps1 resolves the product root from its own location, so this
 # test runs it inside a throwaway COPY of the product and never touches the real
@@ -10,6 +10,7 @@ $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 
 $root = Split-Path $PSScriptRoot -Parent
+. (Join-Path $root 'scripts\dsh-detect.ps1')
 $failures = [Collections.Generic.List[string]]::new()
 $checks = 0
 
@@ -77,6 +78,7 @@ $stage = Join-Path ([IO.Path]::GetTempPath()) ("a2a-bootstrap-" + [Guid]::NewGui
 New-Item -ItemType Directory -Force (Join-Path $stage 'scripts') | Out-Null
 New-Item -ItemType Directory -Force (Join-Path $stage 'examples') | Out-Null
 Copy-Item (Join-Path $root 'scripts\bootstrap.ps1') (Join-Path $stage 'scripts') -Force
+Copy-Item (Join-Path $root 'scripts\dsh-detect.ps1') (Join-Path $stage 'scripts') -Force
 Copy-Item (Join-Path $root 'examples\message-templates.json') (Join-Path $stage 'examples') -Force
 Copy-Item (Join-Path $root 'examples\config.json') (Join-Path $stage 'examples') -Force
 $bootstrap = Join-Path $stage 'scripts\bootstrap.ps1'
@@ -195,6 +197,58 @@ try {
 } finally {
     Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
 }
+
+# DSH command-line detection. This is the rule bootstrap uses when it is not given
+# -DshDataHome, and it is what a new user's first command runs. It used to be an inline
+# pattern that grabbed the FIRST drive-lettered path on the line and stretched it to the
+# marker, so a machine that launches DSH with an absolute node path produced
+#   C:\Program Files\nodejs\node.exe" D:\apps\dsh
+# - node's own path, the quote between the arguments and everything up to the marker - and
+# `Test-Path` rejected it as an illegal path. Nothing in the suite reached that branch,
+# because every case below passed -DshDataHome explicitly.
+#
+# These fixtures are repeated in crates/handoff-core/src/config.rs, so the PowerShell rule
+# here and the Rust rule in detect_dsh cannot drift apart unnoticed.
+Write-Output 'DSH command-line detection'
+$quoted = '"C:\Program Files\nodejs\node.exe" D:\apps\dsh\runtime\node_modules\@deepseek-ai\dsh\lib\bin.js web --host 127.0.0.1 --port 3080'
+Check 'a quoted node path does not swallow the dsh root' `
+    ((Get-DshInstallRoot $quoted) -eq 'D:\apps\dsh') "got '$((Get-DshInstallRoot $quoted))'"
+$quotedPlain = '"C:\nodejs\node.exe" D:\apps\dsh\runtime\node_modules\@deepseek-ai\dsh\lib\bin.js web'
+Check 'a quote-free node path works too' `
+    ((Get-DshInstallRoot $quotedPlain) -eq 'D:\apps\dsh') "got '$((Get-DshInstallRoot $quotedPlain))'"
+$entryQuoted = 'node "D:\apps\dsh\runtime\node_modules\@deepseek-ai\dsh\lib\bin.js" web'
+Check 'the entry script may be the quoted argument' `
+    ((Get-DshInstallRoot $entryQuoted) -eq 'D:\apps\dsh') "got '$((Get-DshInstallRoot $entryQuoted))'"
+$bare = 'D:\nodejs\node.exe D:\apps\dsh\runtime\node_modules\@deepseek-ai\dsh\lib\bin.js web'
+Check 'neither argument needs quoting' `
+    ((Get-DshInstallRoot $bare) -eq 'D:\apps\dsh') "got '$((Get-DshInstallRoot $bare))'"
+$runner = '"C:\Program Files\nodejs\node.exe" D:\apps\dsh\runtime\node_modules\@deepseek-ai\dsh-subprocess-local\lib\runner.js -- cmd'
+Check 'another dsh process is not the install root' `
+    ($null -eq (Get-DshInstallRoot $runner)) "got '$((Get-DshInstallRoot $runner))'"
+Check 'an empty command line yields nothing' ($null -eq (Get-DshInstallRoot '')) ''
+Check 'a relative entry script is not an install root' `
+    ($null -eq (Get-DshInstallRoot 'node runtime\node_modules\@deepseek-ai\dsh\lib\bin.js web')) ''
+
+# A data home is only accepted when it has the layout DSH writes.
+$detectStage = Join-Path ([IO.Path]::GetTempPath()) ("a2a-detect-" + [Guid]::NewGuid().ToString('N').Substring(0, 8))
+try {
+    New-Item -ItemType Directory -Force (Join-Path $detectStage 'dsh-data\storages\session_projcache\sessions') | Out-Null
+    $shaped = '"C:\Program Files\nodejs\node.exe" D:\apps\dsh\runtime\node_modules\@deepseek-ai\dsh\lib\bin.js web'
+    Check 'a line without a usable data directory yields nothing' `
+        ($null -eq (Get-DshDataHomeFromCommandLines @($shaped))) "got '$((Get-DshDataHomeFromCommandLines @($shaped)))'"
+} finally {
+    Remove-Item $detectStage -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# The two must not grow separate copies of the rule again.
+$bootstrapSource = [IO.File]::ReadAllText((Join-Path $root 'scripts\bootstrap.ps1'), [Text.Encoding]::UTF8)
+Check 'bootstrap calls the shared detection helper' `
+    ($bootstrapSource -match 'Get-DshDataHomeFromCommandLines') 'bootstrap no longer detects on its own'
+Check 'bootstrap carries no command-line pattern of its own' `
+    (-not ($bootstrapSource -match 'node_modules..@deepseek-ai')) 'a second copy of the rule is back'
+$rustSource = [IO.File]::ReadAllText((Join-Path $root 'crates\handoff-core\src\config.rs'), [Text.Encoding]::UTF8)
+Check 'the Rust side keeps the rule in a testable function' `
+    ($rustSource -match 'pub fn dsh_install_root') 'detect_dsh parses inline again'
 
 Write-Output ''
 Write-Output "Bootstrap/first-run: $checks check(s), $($failures.Count) failure(s)."
