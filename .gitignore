@@ -22,6 +22,7 @@
 !/tests/README.md
 !/tests/staged-flow-integration.py
 !/tests/test-adapter-config.ps1
+!/tests/test-agent-docs.ps1
 !/tests/test-bootstrap-firstrun.ps1
 !/tests/test-claude-anchor-stability.ps1
 !/tests/test-draft-failure-path.ps1

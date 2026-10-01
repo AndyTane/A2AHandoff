@@ -71,6 +71,12 @@ foreach ($doc in @('CONFIGURATION.md', 'FEATURES.md', 'A2AHANDOFF_UI.md', 'MESSA
 Copy-Item (Join-Path $root 'LICENSE') $stage
 Copy-Item (Join-Path $root 'README.md') $stage
 
+# 4b. What the user's agent reads. AGENTS.md is the install/repair procedure, and the skill is
+# the same steps in the format a DSH or Claude agent catalog loads - so the user can hand the
+# folder to their agent instead of explaining the tool to it.
+Copy-Item (Join-Path $root 'AGENTS.md') $stage
+Copy-Item (Join-Path $root 'skills') $stage -Recurse
+
 # 5. The three steps, in the archive root where they cannot be missed.
 $firstRun = @"
 A2AHandoff $Version - Windows x64
@@ -87,12 +93,15 @@ Do not move the .exe files out of this folder: they load ..\adapters from beside
 
      .\A2AHandoff.exe --product-root .
 
-   Starting it by double-click also works once runtime\config.json exists.
+   Double-clicking it works too: it finds this folder and writes runtime\config.json itself.
 
 3. In the window, open "Binding Configuration": select the DSH session and paste the
    Claude Cowork cse_... Session ID. Then press "监听" to start watching.
 
 Automatic handoff is off until you turn on "自动交接". Nothing is sent without a binding.
+
+Your agent can do steps 1 and 2 and walk you through step 3: point it at AGENTS.md, or copy
+skills\a2a-handoff-setup into its skills folder so it knows this tool by itself.
 "@
 Set-Content (Join-Path $stage 'START-HERE.txt') $firstRun -Encoding UTF8
 

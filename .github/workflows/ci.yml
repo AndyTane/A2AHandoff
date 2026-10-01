@@ -24,6 +24,7 @@ jobs:
         shell: powershell
         run: |
           .\tests\test-script-encoding.ps1
+          .\tests\test-agent-docs.ps1
           .\tests\test-adapter-config.ps1
           .\tests\test-bootstrap-firstrun.ps1
           .\tests\test-claude-anchor-stability.ps1

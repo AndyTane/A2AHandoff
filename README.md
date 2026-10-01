@@ -57,6 +57,10 @@ The same three steps are in `START-HERE.txt` inside the archive. Starting the ex
 
 Packages are unsigned, so SmartScreen warns about an unknown publisher, and each release lists the SHA-256 of its download.
 
+## For agents
+
+If you are setting this up for someone else, [`AGENTS.md`](AGENTS.md) is the whole procedure: the commands, what a correct first run looks like, the evidence to read when a handoff stalls, and the parts that are not yours to decide — binding a session is the user's choice, and pressing send never is. [`skills/a2a-handoff-setup/SKILL.md`](skills/a2a-handoff-setup/SKILL.md) carries the same steps as an installable skill, so an agent can know this tool without being told about it. Both ship inside the release archive.
+
 ## Quick start from source
 
 ```powershell

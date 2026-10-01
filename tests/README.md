@@ -8,6 +8,7 @@ The repository intentionally keeps only deterministic tests that do not send mes
 - `test-adapter-config.ps1` — adapters read every machine-specific value from `runtime/config.json` with the documented fallbacks.
 - `test-bootstrap-firstrun.ps1` — first-run detection, config seeding and explicit-argument handling.
 - `test-script-encoding.ps1` — every PowerShell source parses as Windows PowerShell 5.1 would read it, and every non-ASCII file carries a UTF-8 BOM.
+- `test-agent-docs.ps1` — the files a user's agent reads are well formed: `AGENTS.md` carries the procedure and the no-sending boundary, every skill under `skills/` declares a `name` matching its directory and a description specific enough to match a user's situation, and the release packager ships both. These fail silently when wrong — a skill with broken front matter simply never appears in an agent's catalog.
 - `test-runtime-coherence.ps1` — asserts invariants against a **running** instance: state freshness, that the status text never claims a side is executing while it is idle, that watermarks do not sit ahead of reality, that every receipt state is known, and that no handoff is stuck in preparation. Read-only; `-SkipObservers` runs the state half only (what CI does), and with no instance present it skips with exit 0 unless `-RequireRunning` is given.
 - `staged-flow-integration.py` — real runtime state machine with fake session/editor I/O.
 - `test-preparation-hold-integration.py` — occupied-draft hold/retry behavior with fake I/O.
