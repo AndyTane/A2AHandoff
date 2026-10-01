@@ -113,3 +113,10 @@ Check 'a_cancel_still_blocks_the_automatic_path' `
 Write-Output ("draft failure path: {0} passed, 0 failed" -f $passed.Count)
 Write-Output ("  refusal cause: {0}; retry stop: {1}" -f $first.Json.error, $retry.Json.error)
 Write-Output 'No messages were sent.'
+
+# Every case above runs the adapter as a child process, and the last one is expected to refuse
+# the automatic path - so it exits non-zero on purpose, and that code is still sitting in
+# $LASTEXITCODE when the script ends. Callers read the script's own exit code, so without this
+# line a run in which all twelve checks passed reported itself as a failure. A check that really
+# fails throws (ErrorActionPreference is Stop) and still ends the script non-zero.
+exit 0

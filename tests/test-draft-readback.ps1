@@ -63,3 +63,7 @@ Check 'a_prefix_difference_is_found' ($short -match 'written=3 read=6 first_diff
 
 Write-Output ("draft readback: {0} passed, 0 failed" -f $passed.Count)
 Write-Output 'No messages were sent.'
+
+# The node probe above is the one child process this script runs; its exit code would otherwise
+# be the script's own. State the result instead, so a caller reads the checks, not node.
+exit 0
