@@ -965,7 +965,7 @@ fn publish(
     };
     publish_state(
         root,
-        &json!({"schema":1,"mode":"live","pid":std::process::id(),"at_ms":now(),"enabled":enabled,"phase":phase,"sending":sending,"status_text":title,"detail":detail,"notice":w["notice"],"dsh_session":b["dsh_session"],"dsh_title":d["title"],"dsh_turn":d["turn"],"dsh_running":d["busy"],"dsh_ok":yes(d,"ok"),"claude_ok":yes(c,"ok"),"claude_state":c["state"],"reply_turn":d["result"]["turn"],"goal":d["goal"],"last_delivery":w["last_delivery"],"next_poll_at_ms":next_poll_ms(),"pending":if p.is_null(){Value::Null}else{json!({"id":p["id"],"direction":p["direction"],"stage":p["stage"],"deadline_ms":p["deadline_ms"]})}}),
+        &json!({"schema":1,"mode":"live","pid":std::process::id(),"at_ms":now(),"enabled":enabled,"phase":phase,"sending":sending,"status_text":title,"detail":detail,"notice":w["notice"],"dsh_session":b["dsh_session"],"dsh_title":d["title"],"dsh_turn":d["turn"],"dsh_running":d["busy"],"dsh_ok":yes(d,"ok"),"claude_ok":yes(c,"ok"),"claude_state":c["state"],"claude_title":c["title"],"reply_turn":d["result"]["turn"],"goal":d["goal"],"last_delivery":w["last_delivery"],"next_poll_at_ms":next_poll_ms(),"pending":if p.is_null(){Value::Null}else{json!({"id":p["id"],"direction":p["direction"],"stage":p["stage"],"deadline_ms":p["deadline_ms"]})}}),
     );
     Ok(())
 }

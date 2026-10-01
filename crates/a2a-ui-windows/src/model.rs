@@ -178,7 +178,17 @@ impl Snapshot {
         let matches = live["dsh_session"].as_str() == Some(b.dsh_session.as_str())
             && !b.dsh_session.is_empty();
         Self {
-            claude_title: b.claude_title,
+            // The card names the conversation the runtime is actually reading. The binding only
+            // carries what was stored when it was set up, and a first run stores the placeholder
+            // "Claude Desktop", so the card showed that string forever while the DSH side showed
+            // its observed session title. The observer has always reported the document name;
+            // it simply was not published. `- Claude` is the application suffix on the window
+            // title, the same one `BindingConfig::load` strips from a legacy window title.
+            claude_title: live["claude_title"]
+                .as_str()
+                .filter(|v| !v.is_empty())
+                .map(|v| v.trim_end_matches(" - Claude").to_owned())
+                .unwrap_or(b.claude_title),
             claude_session: b.claude_session,
             target_window: b.claude_window,
             dsh_session: b.dsh_session,
@@ -380,6 +390,32 @@ mod tests {
         assert!(s.dsh_turn.is_none());
         assert!(s.dsh_running.is_none());
         assert!(!s.config_available);
+    }
+    #[test]
+    fn the_claude_card_shows_the_observed_conversation_name() {
+        let d = temporary();
+        fs::create_dir_all(d.join("runtime")).unwrap();
+        fs::write(
+            d.join("runtime/bindings.json"),
+            r#"{"claude_session":"cse_x","claude_title":"Claude Desktop",
+                "claude_window":"Claude Desktop","dsh_session":"session-x"}"#,
+        )
+        .unwrap();
+        // Nothing observed yet: the stored title is all there is, placeholder and all.
+        assert_eq!(Snapshot::load(&d).claude_title, "Claude Desktop");
+        // Observed: the live window title wins, without the application suffix - the same
+        // suffix `BindingConfig::load` strips from a legacy window title.
+        let state = r#"{"mode":"live","claude_ok":true,"claude_title":"项目会话交接 - Claude"}"#;
+        fs::write(d.join("runtime/state.json"), state).unwrap();
+        assert_eq!(Snapshot::load(&d).claude_title, "项目会话交接");
+        // An observation that failed carries no title, so the card keeps the stored one.
+        fs::write(
+            d.join("runtime/state.json"),
+            r#"{"mode":"live","claude_ok":false,"error":"CLAUDE_UNAVAILABLE"}"#,
+        )
+        .unwrap();
+        assert_eq!(Snapshot::load(&d).claude_title, "Claude Desktop");
+        fs::remove_dir_all(d).unwrap();
     }
     #[test]
     fn oversize_json_is_rejected() {

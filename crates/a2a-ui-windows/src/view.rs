@@ -24,6 +24,10 @@ pub const ID_RESTORE: usize = 305;
 pub const ID_BANNER_LOGS: usize = 306;
 pub const ID_BANNER_POLL: usize = 308;
 pub const ID_BANNER_RETRY: usize = 310;
+/// A banner button needs its own id even when it runs the same action as a top-bar control:
+/// the child controls are positioned by id from the spec list, so a banner button carrying
+/// `ID_BINDINGS` moved the real 绑定配置 control out of the top bar and into the banner.
+pub const ID_BANNER_BINDINGS: usize = 311;
 pub const ID_SETTINGS: usize = 309;
 
 pub const MIN_POLL: u64 = 1;
@@ -553,6 +557,10 @@ pub struct Ui {
     pub auto_on: bool,
     pub round: Option<u64>,
     pub claude_bound: bool,
+    /// False while the DSH side still holds a first-run placeholder, or holds no session at
+    /// all. The card then says 未绑定 instead of the listener's 「不可读」, which describes a
+    /// read fault rather than an empty product.
+    pub dsh_bound: bool,
     pub claude_task: String,
     pub claude_status: (Tone, String),
     pub dsh_task: String,
@@ -571,6 +579,18 @@ pub struct Ui {
 
 fn live_str<'a>(s: &'a Snapshot, k: &str) -> &'a str {
     s.live[k].as_str().unwrap_or("")
+}
+/// The one state a new user can clear from inside the window: nothing can be read, written or
+/// sent until a session is bound, so the banner carries the button that opens 绑定配置 rather
+/// than sending the reader off to look for a fault.
+fn bindings_button() -> BannerButton {
+    BannerButton {
+        id: ID_BANNER_BINDINGS,
+        label: "打开绑定配置",
+        icon: None,
+        ghost: false,
+        enabled: true,
+    }
 }
 fn view_log_button() -> BannerButton {
     BannerButton {
@@ -777,14 +797,25 @@ pub fn derive(s: &Snapshot, watch_alive: bool, notice: Option<&Notice>, now: u64
         phase.as_str(),
         "unclaimed" | "paused_by_user" | "hold_send_uncertain" | "hold_preparation"
     );
-    let claude_bound = !s.claude_session.is_empty() && !s.claude_title.is_empty();
+    // First-run bindings are placeholders, not a binding. `cse_unconfigured` is a non-empty
+    // string, so a freshly downloaded product reported 「已绑定」 and nothing on screen told a
+    // configured instance apart from one that had never been set up - the reader saw a read
+    // failure and went looking for a fault instead of for 绑定配置. The placeholder values
+    // belong to handoff-core, so the window cannot disagree with the adapters about what
+    // "not bound yet" means.
+    let claude_unbound = s.claude_session.is_empty()
+        || handoff_core::config::is_placeholder_binding(&s.claude_session, "cse_");
+    let dsh_unbound = s.dsh_session.is_empty()
+        || handoff_core::config::is_placeholder_binding(&s.dsh_session, "session-");
+    let claude_bound = !claude_unbound && !s.claude_title.is_empty();
+    let dsh_bound = !dsh_unbound;
     let claude_ok = s.live["claude_ok"].as_bool();
     let dsh_ok = s.live["dsh_ok"].as_bool();
     let demo_paused = demo == Some("paused");
     let claude_read_failed = demo_paused || (available && claude_ok == Some(false));
     let dsh_read_failed = available && dsh_ok == Some(false);
     let claude_status = if !claude_bound {
-        (Tone::Muted, "尚未绑定窗口".to_owned())
+        (Tone::Muted, "尚未绑定会话，请打开「绑定配置」".to_owned())
     } else if claude_read_failed {
         if demo_paused {
             (Tone::Warn, "绑定已保存，会话待核验".into())
@@ -796,12 +827,18 @@ pub fn derive(s: &Snapshot, watch_alive: bool, notice: Option<&Notice>, now: u64
     } else {
         (Tone::Warn, "绑定已保存，会话待核验".into())
     };
-    let dsh_sub = match (s.dsh_turn, s.dsh_running) {
-        (Some(n), Some(true)) => format!("第 {n} 轮进行中"),
-        (Some(n), Some(false)) => format!("第 {n} 轮已结束"),
-        _ => "原生轮次暂不可读".into(),
+    let dsh_sub = if !dsh_bound {
+        "尚未绑定会话".into()
+    } else {
+        match (s.dsh_turn, s.dsh_running) {
+            (Some(n), Some(true)) => format!("第 {n} 轮进行中"),
+            (Some(n), Some(false)) => format!("第 {n} 轮已结束"),
+            _ => "原生轮次暂不可读".into(),
+        }
     };
-    let dsh_status = if auto_on {
+    let dsh_status = if !dsh_bound {
+        (Tone::Muted, "请打开「绑定配置」选择会话".to_owned())
+    } else if auto_on {
         (Tone::Ok, "自动交接已开启，收到新回复即开始".to_owned())
     } else {
         (Tone::Muted, "自动交接已暂停，需手动发送".into())
@@ -871,6 +908,24 @@ pub fn derive(s: &Snapshot, watch_alive: bool, notice: Option<&Notice>, now: u64
                 ghost: false,
                 enabled: pending,
             }],
+        }
+    } else if demo.is_none() && (claude_unbound || dsh_unbound) {
+        // Nothing can be read, written or sent before a session is bound, and the first thing a
+        // new download used to show was the raw adapter failure for the placeholder session
+        // (`ENOENT: no such file or directory, open 'D:\...'`), which reads as a fault rather
+        // than as an empty product. Say what the state is, name the one step out of it, and put
+        // that step's button in the banner.
+        let what = match (claude_unbound, dsh_unbound) {
+            (true, true) => "选择要绑定的 DSH 会话，并填入 Claude 的 cse_… 会话 ID",
+            (true, false) => "填入 Claude 的 cse_… 会话 ID",
+            _ => "选择要绑定的 DSH 会话",
+        };
+        Banner {
+            variant: Variant::Warn,
+            title: "还不能开始：会话尚未绑定".to_owned(),
+            desc: format!("打开「绑定配置」，{what}。"),
+            code: None,
+            buttons: vec![bindings_button()],
         }
     } else if holding || demo == Some("error") {
         let target = if s.live["last_delivery"]["direction"] == "DSH_TO_CLAUDE" {
@@ -1083,6 +1138,7 @@ pub fn derive(s: &Snapshot, watch_alive: bool, notice: Option<&Notice>, now: u64
         auto_on,
         round: s.dsh_turn,
         claude_bound,
+        dsh_bound,
         claude_task: if claude_bound {
             s.claude_title.clone()
         } else {
@@ -1276,9 +1332,18 @@ pub fn build(
                 2 + 16 + if ui.claude_bound { 16 } else { 0 } + m.text_w(t, Font::Small),
             )
         } else {
-            let t = ui.listener.short();
+            // A placeholder session is not a binding: 「不可读」 describes a read fault and sends
+            // the reader looking for one, where 未绑定 points at 绑定配置.
+            let t = if ui.dsh_bound {
+                ui.listener.short()
+            } else {
+                "未绑定"
+            };
             (t, 16 + 12 + m.text_w(t, Font::Small))
         };
+        // The green dot must not appear on an unbound card: 「未绑定」 in the "listening" colour
+        // would claim a listener that has nothing to listen to.
+        let listening_badge = !claude && ui.listening && ui.dsh_bound;
         let bx = x0 + iw - bw;
         if claude {
             v.rect(Box2::new(bx, 98, bw, 22), 6, RAISED, Some(LINE));
@@ -1304,20 +1369,20 @@ pub fn build(
             v.rect(
                 Box2::new(bx, 98, bw, 22),
                 6,
-                if ui.listening { OK_TINT } else { RAISED },
+                if listening_badge { OK_TINT } else { RAISED },
                 None,
             );
             v.rect(
                 Box2::new(bx + 8, 106, 6, 6),
                 3,
-                if ui.listening { OK } else { TEXT3 },
+                if listening_badge { OK } else { TEXT3 },
                 None,
             );
             v.text(
                 Box2::new(bx + 20, 100, bw - 28, 18),
                 badge,
                 Font::Small,
-                if ui.listening { OK_TEXT } else { TEXT3 },
+                if listening_badge { OK_TEXT } else { TEXT3 },
                 Align::Left,
             );
         }
@@ -2384,8 +2449,142 @@ mod tests {
         s.claude_title.clear();
         s.claude_session.clear();
         let ui = derive(&s, true, None, 0);
-        assert_eq!(ui.claude_status.1, "尚未绑定窗口");
+        assert_eq!(ui.claude_status.1, "尚未绑定会话，请打开「绑定配置」");
         assert_eq!(ui.claude_task, "–");
+    }
+    /// A fresh download ships placeholder bindings, and `cse_unconfigured` is a non-empty
+    /// string: the card claimed 「已绑定」, so nothing on screen told a configured instance from
+    /// one nobody had set up yet.
+    #[test]
+    fn placeholder_bindings_are_not_a_binding() {
+        let mut s = live(json!({}));
+        s.claude_session = handoff_core::config::PLACEHOLDER_CLAUDE_SESSION.to_owned();
+        s.claude_title = handoff_core::config::PLACEHOLDER_CLAUDE_TITLE.to_owned();
+        s.dsh_session = handoff_core::config::PLACEHOLDER_DSH_SESSION.to_owned();
+        let ui = derive(&s, true, None, 1_000);
+        assert!(!ui.claude_bound, "a placeholder session is not a binding");
+        assert!(!ui.dsh_bound, "a placeholder session is not a binding");
+        assert_eq!(ui.claude_task, "–");
+        assert_eq!(ui.dsh_sub, "尚未绑定会话");
+        assert_eq!(ui.banner.title, "还不能开始：会话尚未绑定");
+        assert_eq!(
+            ui.banner.buttons.iter().map(|b| b.id).collect::<Vec<_>>(),
+            vec![ID_BANNER_BINDINGS],
+            "the banner carries the step that ends the state"
+        );
+        assert!(
+            ui.banner.desc.contains("绑定配置"),
+            "got {}",
+            ui.banner.desc
+        );
+        assert!(
+            ui.banner.desc.contains("cse_"),
+            "both sides are missing, so both are named: {}",
+            ui.banner.desc
+        );
+    }
+    /// One side is still a placeholder: the banner names the missing step only, and the
+    /// configured card keeps its own state.
+    #[test]
+    fn a_half_bound_product_names_only_the_missing_side() {
+        let mut s = live(json!({}));
+        s.dsh_session = handoff_core::config::PLACEHOLDER_DSH_SESSION.to_owned();
+        let ui = derive(&s, true, None, 1_000);
+        assert!(ui.claude_bound);
+        assert!(!ui.dsh_bound);
+        assert!(
+            ui.banner.desc.contains("DSH 会话"),
+            "got {}",
+            ui.banner.desc
+        );
+        assert!(
+            !ui.banner.desc.contains("cse_"),
+            "Claude is already bound: {}",
+            ui.banner.desc
+        );
+    }
+    /// Child controls are keyed by id, so two specs carrying the same id collapse into a single
+    /// control and the last position wins. A banner button that reused a top-bar id therefore
+    /// moved the real top-bar control into the banner: with the unbound banner offering
+    /// 「绑定配置」, that button vanished from the top bar, and only a screenshot showed it.
+    #[test]
+    fn a_view_never_asks_for_two_controls_with_one_id() {
+        let unbound = {
+            let mut s = live(json!({}));
+            s.claude_session = handoff_core::config::PLACEHOLDER_CLAUDE_SESSION.to_owned();
+            s.dsh_session = handoff_core::config::PLACEHOLDER_DSH_SESSION.to_owned();
+            s
+        };
+        let states: Vec<(&str, Snapshot)> = vec![
+            ("bound", live(json!({}))),
+            (
+                "sending",
+                live(json!({"sending":true,"pending":{"id":"x","stage":"sending"}})),
+            ),
+            (
+                "held",
+                live(json!({"detail":"DRAFT_WRITE_FAILED",
+                    "last_delivery":{"state":"draft_unverified","direction":"DSH_TO_CLAUDE"}})),
+            ),
+            (
+                "read failed",
+                live(json!({"claude_ok":false,"detail":"TARGET_DOCUMENT_UNAVAILABLE: open"})),
+            ),
+            ("unbound", unbound),
+        ];
+        for (name, s) in states {
+            let v = build(&Est, 960, &s, true, None, 0, 1_000);
+            let mut ids: Vec<usize> = v.controls.iter().map(|c| c.id).collect();
+            let before = ids.len();
+            ids.sort_unstable();
+            ids.dedup();
+            assert_eq!(
+                ids.len(),
+                before,
+                "{name}: one id cannot place two controls: {ids:?}"
+            );
+        }
+    }
+    /// What a first-run reader was shown instead: the raw adapter failure for the placeholder
+    /// session, which reads as a fault in a product that is simply not set up yet.
+    #[test]
+    fn the_unbound_banner_hides_the_adapter_failure() {
+        let mut s = live(json!({"claude_ok":false,"dsh_ok":false,
+            "detail":"ENOENT: no such file or directory, open 'D:\\Tools\\x'"}));
+        s.claude_session = handoff_core::config::PLACEHOLDER_CLAUDE_SESSION.to_owned();
+        let ui = derive(&s, true, None, 1_000);
+        assert_eq!(ui.banner.variant, Variant::Warn);
+        assert!(!ui.banner.desc.contains("ENOENT"), "got {}", ui.banner.desc);
+        assert!(
+            !ui.banner.title.contains("无法读取"),
+            "got {}",
+            ui.banner.title
+        );
+        assert!(
+            ui.banner.code.is_none(),
+            "a window state is not a runtime error code"
+        );
+    }
+    /// The DSH card must say 未绑定 rather than the listener's 「不可读」, which describes a read
+    /// fault - and the badge must not wear the green "listening" colour it has no claim to.
+    #[test]
+    fn an_unbound_dsh_card_says_so_instead_of_a_read_fault() {
+        let mut s = Snapshot::for_demo("running");
+        s.dsh_session = handoff_core::config::PLACEHOLDER_DSH_SESSION.to_owned();
+        let v = build(&Est, 960, &s, true, None, 0, 1_000);
+        let texts: Vec<&str> = v
+            .prims
+            .iter()
+            .filter_map(|p| match p {
+                Prim::Text { s, .. } => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.contains(&"未绑定"), "card texts: {texts:?}");
+        assert!(
+            !texts.contains(&"不可读"),
+            "an unbound card reports no read fault: {texts:?}"
+        );
     }
     #[test]
     fn long_texts_stay_inside_their_boxes() {

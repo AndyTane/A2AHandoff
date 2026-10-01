@@ -1016,14 +1016,16 @@ impl App {
                     }
                 }
             }
-            view::ID_BINDINGS => match show_binding_config(hwnd, &self.product, &self.snapshot) {
-                Ok(true) => {
-                    self.snapshot = Snapshot::load(&self.product);
-                    self.say(Variant::Success, "绑定配置已保存", "状态卡已刷新。");
+            view::ID_BINDINGS | view::ID_BANNER_BINDINGS => {
+                match show_binding_config(hwnd, &self.product, &self.snapshot) {
+                    Ok(true) => {
+                        self.snapshot = Snapshot::load(&self.product);
+                        self.say(Variant::Success, "绑定配置已保存", "状态卡已刷新。");
+                    }
+                    Ok(false) => {}
+                    Err(e) => self.say(Variant::Error, "绑定配置未打开", &e),
                 }
-                Ok(false) => {}
-                Err(e) => self.say(Variant::Error, "绑定配置未打开", &e),
-            },
+            }
             view::ID_SETTINGS if !self.demo => match settings_dialog::show(hwnd, &self.product) {
                 Ok(true) => {
                     self.snapshot = Snapshot::load(&self.product);
