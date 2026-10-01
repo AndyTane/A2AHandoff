@@ -786,13 +786,15 @@ fn waiting_on_whom(w: &Value, d: &Value, c: &Value) -> Option<&'static str> {
     if yes(d, "busy") {
         return Some("DSH");
     }
+    // A completed DSH result that has not been handed over: nothing is awaited, and a click is
+    // the way to hand it over. Checked before "the last handover went to Claude", which used to
+    // claim 「第 N 轮结果已投递」 for a round that had just been cancelled and never left.
+    if number(&d["result"], "end_seq") > number(w, "dsh_after_seq") {
+        return None;
+    }
     // The last handover went to Claude, so Claude owes the next move.
     if has_delivery && delivered_to_claude && claude_new_reply {
         return Some("Claude");
-    }
-    // A completed DSH result that has not been handed over: nothing is awaited.
-    if number(&d["result"], "end_seq") > number(w, "dsh_after_seq") {
-        return None;
     }
     if has_delivery && delivered_to_claude {
         return Some("Claude");
@@ -1464,6 +1466,35 @@ mod live_tests {
         assert_ne!(hash("A\nB"), hash("A\nC"), "a changed word is a change");
         assert_ne!(hash("A\nB"), hash("A B"), "a missing line is a change");
         assert_ne!(hash("A\nB"), hash("ab"), "case is a change");
+    }
+    /// A round that was never handed over must not be described as delivered.
+    ///
+    /// After 取消本次 the source stays on offer, but `last_delivery` still points at the
+    /// *previous* round - so the window claimed 「第 N 轮结果已投递；Claude 回复后转交 DSH」 for a
+    /// round that never left, and the one action that would move it (a click) was the thing the
+    /// text argued against.
+    #[test]
+    fn an_undelivered_result_is_reported_as_waiting_to_be_handed_over() {
+        let (_, d, c, mut w) = fixture();
+        // The previous round went out; a new DSH result is waiting and nothing is pending.
+        w["last_delivery"] =
+            json!({"direction":"DSH_TO_CLAUDE","state":"sent","claude_reply_index":6});
+        w["dsh_after_seq"] = json!(988);
+        let mut d2 = d.clone();
+        d2["busy"] = json!(false);
+        d2["result"]["end_seq"] = json!(1000);
+        let mut c2 = c.clone();
+        c2["state"] = json!("replied");
+        c2["ui_message_index"] = json!(7);
+        assert_eq!(
+            waiting_on_whom(&w, &d2, &c2),
+            None,
+            "an undelivered result means nothing is awaited"
+        );
+        // Once it is handed over, the same world does wait on Claude.
+        let mut d3 = d2.clone();
+        d3["result"]["end_seq"] = json!(988);
+        assert_eq!(waiting_on_whom(&w, &d3, &c2), Some("Claude"));
     }
     #[test]
     fn fresh_install_never_auto_sends_history() {

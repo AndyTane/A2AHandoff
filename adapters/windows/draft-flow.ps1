@@ -44,7 +44,14 @@ try{
  # nothing reached the peer and re-running cannot duplicate a message. Every state that might
  # have gone out - send_attempted, submit_uncertain, sent - stays refused, and so does an
  # automatic request, which is what this guard exists for.
- $retryUnverified=$script:r.manual -and $null -ne $previous -and $previous.state -eq 'draft_unverified'
+ # A deliberate click may re-run a draft that never left: `draft_unverified` (the write could
+ # not be read back) and `cancelled_before_send` (cancelled or abandoned before submitting).
+ # Both are written before anything is submitted, so nothing reached the peer and re-running
+ # cannot duplicate a message. `receipt_is_terminal` in the runtime already treats exactly these
+ # as retryable - refusing them here meant 取消本次 burned the round for good, and no click could
+ # ever send it again. Every state that might have gone out - send_attempted, submit_uncertain,
+ # sent - stays refused, and so does an automatic request: that is what this guard is for.
+ $retryUnverified=$script:r.manual -and $null -ne $previous -and $previous.state -in @('draft_unverified','cancelled_before_send')
  if($null -ne $previous){
   if((Get-Field $previous 'flow' '') -cne 'draft-first-v1' -or ($previous.state -ne 'draft_ready' -and -not $retryUnverified)){throw 'DELIVERY_ALREADY_ATTEMPTED_NO_RETRY'}
   if($previous.outgoing_hash -cne (Hash-Message $script:r.text)){throw 'DRAFT_REQUEST_CHANGED'}

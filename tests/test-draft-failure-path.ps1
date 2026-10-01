@@ -1,4 +1,4 @@
-# The adapter must answer even when it fails, and must refuse the right things.
+﻿# The adapter must answer even when it fails, and must refuse the right things.
 #
 # draft-flow.ps1 runs under `Set-StrictMode -Version Latest` (draft-primitives.ps1). When its
 # error handler read a variable that had never been assigned, the handler itself threw, the
@@ -98,6 +98,17 @@ $retry = Invoke-Draft -State 'draft_unverified' -Manual $true
 Check 'a_click_may_re_run_an_unverified_draft' `
     ($retry.Json.error -ne 'DELIVERY_ALREADY_ATTEMPTED_NO_RETRY') `
     "error=$($retry.Json.error)"
+
+# 5. A cancelled draft never left either, so a click may re-run it - but 取消本次 must keep
+#    blocking the automatic path, or the cancel means nothing.
+$cancelled = Invoke-Draft -State 'cancelled_before_send' -Manual $true
+Check 'a_click_may_re_run_a_cancelled_draft' `
+    ($cancelled.Json.error -ne 'DELIVERY_ALREADY_ATTEMPTED_NO_RETRY') `
+    "error=$($cancelled.Json.error)"
+$cancelledAuto = Invoke-Draft -State 'cancelled_before_send' -Manual $false
+Check 'a_cancel_still_blocks_the_automatic_path' `
+    ($cancelledAuto.Json.error -eq 'DELIVERY_ALREADY_ATTEMPTED_NO_RETRY') `
+    "error=$($cancelledAuto.Json.error)"
 
 Write-Output ("draft failure path: {0} passed, 0 failed" -f $passed.Count)
 Write-Output ("  refusal cause: {0}; retry stop: {1}" -f $first.Json.error, $retry.Json.error)
