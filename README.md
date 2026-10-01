@@ -36,6 +36,27 @@ For a prebuilt Windows release, the machine needs:
 
 Rust/Cargo are only required when building from source.
 
+## Download (Windows)
+
+Prebuilt packages are attached to [Releases](https://github.com/AndyTane/A2AHandoff/releases). Unzip it anywhere and keep the files together: the executables load `adapters/` from beside them, so moving `A2AHandoff.exe` on its own starts a window that can read and send nothing.
+
+```powershell
+# 1. Check this machine against the requirements above.
+powershell -ExecutionPolicy Bypass -File .\scripts\check-prereqs.ps1
+
+# 2. Create runtime\config.json and detect the local DSH data directory.
+powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap.ps1
+
+# 3. Start.
+.\A2AHandoff.exe --product-root .
+```
+
+Then open **Binding Configuration** in the window: select the DSH session and paste the Claude Cowork `cse_...` Session ID. Automatic handoff stays off until 自动交接 is switched on, and nothing is sent while the bindings are still the shipped placeholders.
+
+The same three steps are in `START-HERE.txt` inside the archive. Starting the executable with no configuration at all also works — it provisions `runtime/config.json` itself and detects DSH the same way; `bootstrap.ps1` is the explicit path and prints what it found.
+
+Packages are unsigned, so SmartScreen warns about an unknown publisher, and each release lists the SHA-256 of its download.
+
 ## Quick start from source
 
 ```powershell
