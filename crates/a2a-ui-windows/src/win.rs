@@ -2420,17 +2420,39 @@ unsafe fn layout_audit(product: &Path) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
     Ok(())
 }
+/// The product root among `candidates`, nearest first.
+///
+/// A directory qualifies when it holds `runtime/config.json`. A downloaded package that has
+/// never been started has no such file yet - first-run provisioning writes it, and that cannot
+/// run until the root is known - so a directory carrying `adapters/` is accepted as well.
+/// Without the second rule, unzipping the release and double-clicking `A2AHandoff.exe` exits
+/// silently with nothing on screen. `runtime/` is deliberately not required: `run` creates it,
+/// and an empty directory is the first thing a copy or an archive tool drops.
+fn product_root_among(candidates: &[PathBuf]) -> Option<PathBuf> {
+    candidates
+        .iter()
+        .find(|parent| parent.join("runtime/config.json").is_file())
+        .or_else(|| {
+            candidates
+                .iter()
+                .find(|parent| parent.join("adapters").is_dir())
+        })
+        .cloned()
+}
+
 fn discover_product(explicit: Option<&str>) -> Result<PathBuf, String> {
     if let Some(path) = explicit {
         return Ok(PathBuf::from(path));
     }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    for parent in exe.ancestors().skip(1).take(6) {
-        if parent.join("runtime/config.json").is_file() {
-            return Ok(parent.to_owned());
-        }
-    }
-    Err("找不到产品配置，请使用 --product-root 指定 product 目录。".into())
+    let candidates: Vec<PathBuf> = exe
+        .ancestors()
+        .skip(1)
+        .take(6)
+        .map(Path::to_path_buf)
+        .collect();
+    product_root_among(&candidates)
+        .ok_or_else(|| "找不到产品配置，请使用 --product-root 指定 product 目录。".into())
 }
 struct UiInstance(HANDLE);
 impl UiInstance {
@@ -2741,5 +2763,36 @@ mod fit_tests {
         assert_eq!(respawn_delay(4), Duration::from_secs(120));
         assert_eq!(respawn_delay(9), Duration::from_secs(120));
         assert_eq!(respawn_delay(u32::MAX), Duration::from_secs(120));
+    }
+    /// A freshly unzipped package has no `runtime/config.json` - provisioning writes it, and
+    /// provisioning needs the root - so the root must also be recognised by shape, or
+    /// double-clicking the executable after a download does nothing at all. The nearest
+    /// candidate wins, and a directory with neither marker is not a product root.
+    #[test]
+    fn a_package_that_was_never_started_is_still_a_product_root() {
+        let base = std::env::temp_dir().join(format!("a2a-root-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let package = base.join("package");
+        let nested = package.join("target").join("release");
+        fs::create_dir_all(package.join("adapters")).unwrap();
+        fs::create_dir_all(package.join("runtime")).unwrap();
+        fs::create_dir_all(&nested).unwrap();
+
+        // Never started: no config.json anywhere, but the package shape is recognisable.
+        assert_eq!(
+            product_root_among(&[nested.clone(), package.clone(), base.clone()]),
+            Some(package.clone())
+        );
+        // Once configured, the nearest directory holding the file wins.
+        fs::write(package.join("runtime/config.json"), b"{}").unwrap();
+        assert_eq!(
+            product_root_among(&[nested.clone(), package.clone()]),
+            Some(package.clone())
+        );
+        // Nothing that looks like a product: no root to report.
+        let empty = base.join("empty");
+        fs::create_dir_all(&empty).unwrap();
+        assert_eq!(product_root_among(&[empty, nested]), None);
+        let _ = fs::remove_dir_all(&base);
     }
 }
