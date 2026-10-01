@@ -24,6 +24,7 @@
 !/tests/test-adapter-config.ps1
 !/tests/test-bootstrap-firstrun.ps1
 !/tests/test-claude-anchor-stability.ps1
+!/tests/test-draft-failure-path.ps1
 !/tests/test-draft-readback.ps1
 !/tests/test-plain-correlation.ps1
 !/tests/test-preparation-hold-integration.py

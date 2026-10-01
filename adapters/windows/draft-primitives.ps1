@@ -1,4 +1,4 @@
-# Read-only UIA helpers for staged sending.
+﻿# Read-only UIA helpers for staged sending.
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
 [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)

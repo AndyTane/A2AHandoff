@@ -1,4 +1,4 @@
-# Stage and commit are separate invocations; this process never owns a countdown loop.
+﻿# Stage and commit are separate invocations; this process never owns a countdown loop.
 param([Parameter(Mandatory=$true)][string]$ProductRoot,[Parameter(Mandatory=$true)][string]$RequestFile,[Parameter(Mandatory=$true)][ValidateSet('Prepare','Commit')][string]$Operation)
 . "$PSScriptRoot\draft-context.ps1"
 . "$PSScriptRoot\composer-draft.ps1"
@@ -25,6 +25,12 @@ function Receipt($state,$anchor=$null){
 }
 $mutex=[Threading.Mutex]::new($false,'Local\A2AHandoff.V1.MessageIO');$owned=$false
 $script:readyAt=0;$script:deadline=0;$script:receipt=''
+# Initialised, not just assigned on failure: this file runs under
+# `Set-StrictMode -Version Latest` (draft-primitives.ps1), where reading a variable that was
+# never set is a terminating error. Reading it in Receipt()/the catch before any failure had
+# assigned it killed the adapter inside its own error handler, so it printed nothing at all
+# and the runtime could only report `adapter_output_invalid`.
+$script:draftDiff=''
 try{
  try{$owned=$mutex.WaitOne(1000)}catch [Threading.AbandonedMutexException]{$owned=$true}
  if(-not $owned){throw 'MESSAGE_IO_BUSY'}
