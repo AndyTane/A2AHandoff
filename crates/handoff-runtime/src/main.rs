@@ -308,6 +308,55 @@ fn manual_changed(w: &Value, d: &Value, c: &Value) -> bool {
             && (number(c, "latest_user_index") != number(w, "claude_anchor_index")
                 || text(c, "latest_user_hash") != text(w, "claude_anchor_hash")))
 }
+/// Marks the source a pending carried as consumed, the way a `sent` receipt does.
+///
+/// Used when a draft is abandoned because the human took the conversation over: the runtime
+/// has decided it will never be sent, so its source must stop being offered. Leaving it on
+/// offer made the bookkeeping and the status text contradict each other - the window said
+/// 「第 N 轮结果已投递」 while `dsh_after_seq` still pointed before that result - kept the
+/// send button lit, and invited a re-send of a result the peer had already answered.
+fn consume(w: &mut Value, p: &Value) {
+    if p.is_null() {
+        return;
+    }
+    if text(p, "direction") == "DSH_TO_CLAUDE" {
+        w["dsh_after_seq"] = p["source_seq"].clone();
+    } else {
+        w["claude_floor"] = p["source_seq"].clone();
+    }
+}
+/// Finishes a decision an older build left half-made.
+///
+/// `superseded_by_user` used to be recorded without consuming the source, which left such a
+/// result on offer forever (caught by tests/test-runtime-coherence.ps1: "a completed result
+/// is either delivered or pending"). The decision itself is not in question - the record
+/// already says the draft will never be sent - so the source is consumed once, here.
+fn reconcile_superseded(home: &Path, w: &mut Value) {
+    if !w["pending"].is_null() || text(&w["last_delivery"], "state") != "superseded_by_user" {
+        return;
+    }
+    let id = text(&w["last_delivery"], "id").to_string();
+    let entry = w["ledger"]
+        .as_array()
+        .and_then(|l| l.iter().find(|e| text(e, "id") == id))
+        .cloned();
+    let Some(entry) = entry else {
+        return;
+    };
+    let before = (number(w, "dsh_after_seq"), number(w, "claude_floor"));
+    consume(w, &entry);
+    if before != (number(w, "dsh_after_seq"), number(w, "claude_floor")) {
+        diagnostic(
+            home,
+            "superseded_source_consumed",
+            &json!({
+                "id":id,
+                "direction":text(&entry, "direction"),
+                "source_seq":number(&entry, "source_seq"),
+            }),
+        );
+    }
+}
 fn direction(s: &str) -> Direction {
     if s == "DSH_TO_CLAUDE" {
         Direction::DshToClaude
@@ -951,6 +1000,7 @@ fn entry() -> Result<(), String> {
     let mut w = read(&home.join("workflow.json"))
         .filter(|w| text(w, "binding_key") == binding_key(&b) && w["ledger"].is_array())
         .unwrap_or_else(|| blank(&b));
+    reconcile_superseded(&home, &mut w);
     if !w["pending"].is_null() {
         let p = w["pending"].clone();
         if let Some(r) = read(&home.join(format!("receipts/{}.json", text(&p, "id")))) {
@@ -1209,10 +1259,14 @@ fn entry() -> Result<(), String> {
             }
         }
         if text(&w, "phase") == "hold_send_uncertain" && manual_changed(&w, &d, &c) {
+            let abandoned = w["pending"].clone();
             w["last_delivery"]["previous_state"] = w["last_delivery"]["state"].clone();
             w["last_delivery"]["state"] = json!("superseded_by_user");
             w["phase"] = json!("paused_by_user");
             w["pending"] = Value::Null;
+            // The draft will never be sent, so the source it carried is consumed now - see
+            // `consume`.
+            consume(&mut w, &abandoned);
             w["notice"] = json!("会话已由人工推进；旧稿不再回发，原始回执保留");
             error.clear();
             diagnostic(
@@ -1602,6 +1656,94 @@ mod live_tests {
             revalidate_candidate(&MessageTemplates::default(), &w, &b, &d, &c, &automatic)
                 .expect("the automatic path still finds a handoff");
         assert_eq!(replanned["direction"], "DSH_TO_CLAUDE");
+    }
+    /// Abandoning a draft must consume the source it carried, or the result stays on offer
+    /// forever while the status text claims it was delivered.
+    #[test]
+    fn an_abandoned_draft_consumes_the_source_it_carried() {
+        let (b, d, c, mut w) = fixture();
+        adopt(&mut w, &d, &c, "DSH_TO_CLAUDE");
+        w["dsh_after_seq"] = json!(900);
+        let to_claude = candidate_for(
+            &MessageTemplates::default(),
+            &w,
+            &b,
+            &d,
+            &c,
+            0,
+            true,
+            Some("DSH_TO_CLAUDE"),
+        )
+        .expect("the click produces a handoff");
+        consume(&mut w, &to_claude);
+        assert_eq!(
+            number(&w, "dsh_after_seq"),
+            number(&to_claude, "source_seq")
+        );
+
+        // The other direction consumes the Claude watermark instead. It needs its own
+        // adopted anchor: a Claude -> DSH click only counts when the reply correlates to
+        // the tool's own input.
+        let (b2, d2, mut c2, mut w2) = fixture();
+        c2["ui_message_index"] = json!(8);
+        c2["latest_user_index"] = json!(7);
+        adopt(&mut w2, &d2, &c2, "CLAUDE_TO_DSH");
+        w2["claude_anchor_hash"] = c2["latest_user_hash"].clone();
+        let to_dsh = candidate_for(
+            &MessageTemplates::default(),
+            &w2,
+            &b2,
+            &d2,
+            &c2,
+            0,
+            true,
+            Some("CLAUDE_TO_DSH"),
+        )
+        .expect("the other click produces a handoff");
+        consume(&mut w2, &to_dsh);
+        assert_eq!(number(&w2, "claude_floor"), number(&to_dsh, "source_seq"));
+
+        // Nothing to abandon consumes nothing.
+        let before = w2["claude_floor"].clone();
+        consume(&mut w2, &Value::Null);
+        assert_eq!(w2["claude_floor"], before);
+    }
+    /// A record an older build left half-made is finished once at startup, and never
+    /// touches a source a live pending still owns.
+    #[test]
+    fn a_superseded_record_is_consumed_once() {
+        let home = std::env::temp_dir().join(format!("a2a-superseded-{}", std::process::id()));
+        fs::create_dir_all(&home).unwrap();
+
+        let mut w = json!({
+            "dsh_after_seq": 13872,
+            "claude_floor": 0,
+            "pending": null,
+            "last_delivery": {"id":"old","direction":"DSH_TO_CLAUDE","state":"superseded_by_user"},
+            "ledger": [{"id":"old","direction":"DSH_TO_CLAUDE","state":"send_attempted","source_seq":14646}]
+        });
+        reconcile_superseded(&home, &mut w);
+        assert_eq!(
+            number(&w, "dsh_after_seq"),
+            14646,
+            "the abandoned source must be consumed"
+        );
+
+        // Idempotent: the next start finds nothing left to finish.
+        let after = w["dsh_after_seq"].clone();
+        reconcile_superseded(&home, &mut w);
+        assert_eq!(w["dsh_after_seq"], after);
+
+        // A live pending owns its source; reconciliation must not steal it.
+        let mut held = json!({
+            "dsh_after_seq": 13872,
+            "pending": {"id":"p","direction":"DSH_TO_CLAUDE","source_seq":14646},
+            "last_delivery": {"id":"old","state":"superseded_by_user"},
+            "ledger": [{"id":"old","direction":"DSH_TO_CLAUDE","source_seq":14646}]
+        });
+        reconcile_superseded(&home, &mut held);
+        assert_eq!(number(&held, "dsh_after_seq"), 13872);
+        let _ = fs::remove_dir_all(&home);
     }
     #[test]
     fn manual_adoption_selects_real_seventh_result() {
