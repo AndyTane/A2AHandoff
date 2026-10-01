@@ -48,6 +48,35 @@ fn write(p: &Path, v: &Value) -> Result<(), String> {
     drop(f);
     fs::rename(t, p).map_err(|e| e.to_string())
 }
+/// Writes the UI-facing status cache, best effort.
+///
+/// `state.json` is derived: the durable workflow lives in `workflow.json`. A failed write
+/// must therefore never stop the runtime. The atomic replace fails with "access denied"
+/// whenever anything holds the file open without FILE_SHARE_DELETE - a virus scanner, a
+/// user reading it, or a monitoring script polling it - and propagating that error used to
+/// exit the process, leaving `runtime/state.<pid>.tmp` behind while the window stayed up
+/// and reported 心跳过期 / 已停止监听: monitoring silently off, with nothing in the window
+/// to say why. Retry briefly in case the holder is transient, then carry on; the next
+/// publish is half a second away, so the heartbeat is only ever as fresh as the last
+/// success and the UI's staleness check stays honest.
+fn publish_state(root: &Path, doc: &Value) {
+    let target = root.join("runtime/state.json");
+    let mut last = String::new();
+    for attempt in 0..3u32 {
+        match write(&target, doc) {
+            Ok(()) => return,
+            Err(e) => {
+                last = e;
+                thread::sleep(Duration::from_millis(30 * u64::from(attempt + 1)));
+            }
+        }
+    }
+    diagnostic(
+        &root.join("runtime"),
+        "state_write_failed",
+        &json!({"error": last}),
+    );
+}
 fn hash(s: &str) -> String {
     hex::encode(Sha256::digest(
         s.replace("\r\n", "\n")
@@ -742,10 +771,11 @@ fn publish(
             ),
         }
     };
-    write(
-        &root.join("runtime/state.json"),
+    publish_state(
+        root,
         &json!({"schema":1,"mode":"live","pid":std::process::id(),"at_ms":now(),"enabled":enabled,"phase":phase,"sending":sending,"status_text":title,"detail":detail,"notice":w["notice"],"dsh_session":b["dsh_session"],"dsh_title":d["title"],"dsh_turn":d["turn"],"dsh_running":d["busy"],"dsh_ok":yes(d,"ok"),"claude_ok":yes(c,"ok"),"claude_state":c["state"],"reply_turn":d["result"]["turn"],"goal":d["goal"],"last_delivery":w["last_delivery"],"next_poll_at_ms":next_poll_ms(),"pending":if p.is_null(){Value::Null}else{json!({"id":p["id"],"direction":p["direction"],"stage":p["stage"],"deadline_ms":p["deadline_ms"]})}}),
-    )
+    );
+    Ok(())
 }
 fn commit_receipt(w: &mut Value, p: &Value, r: &Value) {
     record(w, p, text(r, "state"));
@@ -1651,5 +1681,44 @@ mod live_tests {
         let original = e.clone();
         clear_recovered_observation_error(&mut e, &json!({"ok":true}), &json!({"ok":true}));
         assert_eq!(e, original);
+    }
+
+    /// A locked status file must not stop monitoring.
+    ///
+    /// `state.json` is written by temp file + rename, and Windows fails that rename with
+    /// "access denied" while anything holds the destination open without
+    /// FILE_SHARE_DELETE - which is what a virus scanner, a text editor, or a monitoring
+    /// script polling the file does. Propagating it exited the runtime and left the window
+    /// showing 心跳过期 with monitoring silently off.
+    #[test]
+    fn a_locked_state_file_does_not_stop_the_runtime() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let dir = std::env::temp_dir().join(format!("a2a-state-write-{}", std::process::id()));
+        let runtime = dir.join("runtime");
+        fs::create_dir_all(&runtime).unwrap();
+        let path = runtime.join("state.json");
+        fs::write(&path, "{}").unwrap();
+
+        // No sharing at all, the way a scanner or an editor holds it.
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+        // Returns instead of exiting, and does not disturb the locked file.
+        publish_state(&dir, &json!({"probe": 1}));
+        drop(held);
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "{}",
+            "the locked attempt must not have written"
+        );
+
+        // And it recovers as soon as the holder lets go.
+        publish_state(&dir, &json!({"probe": 2}));
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"probe\": 2"), "must recover, got: {text}");
+        let _ = fs::remove_dir_all(&dir);
     }
 }
