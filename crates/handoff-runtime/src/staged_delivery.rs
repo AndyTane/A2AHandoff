@@ -159,15 +159,8 @@ pub(super) fn drive(
         return Ok(());
     }
     let templates = load_message_templates(&home)?;
-    let q = candidate(
-        &templates,
-        w,
-        b,
-        d,
-        c,
-        number(&p, "dispatch_delay_seconds"),
-        yes(&p, "manual"),
-    );
+    // Re-ask the SAME question the pending was built from - see `revalidate_candidate`.
+    let q = revalidate_candidate(&templates, w, b, d, c, &p);
     let same = q.as_ref().is_some_and(|q| {
         q["id"] == p["id"]
             && q["source_seq"] == p["source_seq"]
@@ -175,8 +168,21 @@ pub(super) fn drive(
             && q["message_templates"] == p["message_templates"]
     });
     if !same {
-        cancel(&home, w, "来源或文案已变化，本次取消；不会覆盖现有草稿")?;
-        *error = "来源或文案发生变化，未发送".into();
+        if q.is_none() {
+            // "There is nothing to send any more" is a different problem from "the reply
+            // moved on", and it needs a different remedy. Reporting it as a source change
+            // sent the user looking for a change that had not happened.
+            cancel(&home, w, "本次没有可发送的内容，已取消；草稿保留")?;
+            let why = last_plan_reason();
+            *error = if why.is_empty() {
+                "本次没有可发送的内容，未发送".into()
+            } else {
+                format!("本次没有可发送的内容，未发送（{why}）")
+            };
+        } else {
+            cancel(&home, w, "来源或文案已变化，本次取消；不会覆盖现有草稿")?;
+            *error = "来源或文案发生变化，未发送".into();
+        }
         return Ok(());
     }
     if !staged {

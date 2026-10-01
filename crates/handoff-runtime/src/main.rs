@@ -412,6 +412,41 @@ fn candidate(
 ) -> Option<Value> {
     candidate_for(templates, w, b, d, c, delay, manual, None)
 }
+/// The candidate a pending must be revalidated against before it is submitted.
+///
+/// A pending the user asked for is re-asked in the direction they asked for; only a pending
+/// the runtime chose is re-planned. This is the same distinction the click path already
+/// makes, and it has to be made here too: `plan_one` is a PRIORITY function, so with a DSH
+/// result waiting it answers "DSH -> Claude" no matter which button was pressed. Re-asking
+/// it about a click that chose the other direction therefore compares two different
+/// questions, always finds them different, and cancels - which is exactly what happened to
+/// every manual send while both sides had something to offer: the click was thrown away
+/// within a tick and the report blamed a source change that never happened.
+///
+/// Nothing safety-relevant is bypassed by naming the direction: `candidate_for` still
+/// requires readable observations, a correlated reply, and applies the consumed/abandoned
+/// rules.
+fn revalidate_candidate(
+    templates: &MessageTemplates,
+    w: &Value,
+    b: &Value,
+    d: &Value,
+    c: &Value,
+    p: &Value,
+) -> Option<Value> {
+    let manual = yes(p, "manual");
+    let requested = text(p, "direction");
+    candidate_for(
+        templates,
+        w,
+        b,
+        d,
+        c,
+        number(p, "dispatch_delay_seconds"),
+        manual,
+        manual.then_some(requested),
+    )
+}
 /// Build the pending handoff.
 ///
 /// `requested` is set only for a deliberate click, and names the side the user asked
@@ -1513,6 +1548,60 @@ mod live_tests {
         // And a manual handoff carries no countdown: the click IS the confirmation.
         assert_eq!(to_dsh["dispatch_delay_seconds"], 0);
         assert_eq!(to_claude["dispatch_delay_seconds"], 0);
+    }
+    /// Revalidation must ask the question the pending was built from.
+    ///
+    /// The bug this pins: with both sides offering something, a click on 发送给 DSH built a
+    /// CLAUDE_TO_DSH pending, then the pre-submit revalidation re-ran the planner WITHOUT the
+    /// requested direction. The planner prefers DSH -> Claude while a DSH result waits, so it
+    /// answered with the other direction, the identities differed, and the send was cancelled
+    /// inside one tick - clicking again just repeated it, and the report blamed a source
+    /// change that had not happened.
+    #[test]
+    fn revalidation_keeps_a_clicks_own_direction() {
+        let (b, d, mut c, mut w) = fixture();
+        c["ui_message_index"] = json!(8);
+        c["latest_user_index"] = json!(7);
+        adopt(&mut w, &d, &c, "CLAUDE_TO_DSH");
+        w["claude_anchor_hash"] = c["latest_user_hash"].clone();
+        // Both sides genuinely pending, which is what tempts the planner to the other side.
+        w["dsh_after_seq"] = number(&d["result"], "end_seq").saturating_sub(1).into();
+
+        let clicked = candidate_for(
+            &MessageTemplates::default(),
+            &w,
+            &b,
+            &d,
+            &c,
+            0,
+            true,
+            Some("CLAUDE_TO_DSH"),
+        )
+        .expect("the click produces its own handoff");
+        assert_eq!(clicked["direction"], "CLAUDE_TO_DSH");
+
+        // Asked the old way, the answer is the OTHER direction: that mismatch is what
+        // cancelled every manual send.
+        let old = candidate(&MessageTemplates::default(), &w, &b, &d, &c, 0, true).unwrap();
+        assert_eq!(old["direction"], "DSH_TO_CLAUDE");
+        assert_ne!(old["id"], clicked["id"]);
+
+        // Asked the new way, the revalidation reproduces exactly what the click built.
+        let again = revalidate_candidate(&MessageTemplates::default(), &w, &b, &d, &c, &clicked)
+            .expect("revalidation must find the same handoff");
+        assert_eq!(again["id"], clicked["id"]);
+        assert_eq!(again["direction"], "CLAUDE_TO_DSH");
+        assert_eq!(again["text"], clicked["text"]);
+        assert_eq!(again["source_seq"], clicked["source_seq"]);
+
+        // An automatic pending is still re-planned: on that path "the plan changed" really
+        // does mean "cancel and decide again".
+        let mut automatic = clicked.clone();
+        automatic["manual"] = json!(false);
+        let replanned =
+            revalidate_candidate(&MessageTemplates::default(), &w, &b, &d, &c, &automatic)
+                .expect("the automatic path still finds a handoff");
+        assert_eq!(replanned["direction"], "DSH_TO_CLAUDE");
     }
     #[test]
     fn manual_adoption_selects_real_seventh_result() {
