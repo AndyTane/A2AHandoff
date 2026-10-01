@@ -117,4 +117,4 @@ The repository must not contain:
 
 ## License
 
-A project license still needs to be selected before the repository is made public. Until a license file is added, the source is not granted an open-source reuse license.
+MIT — see [`LICENSE`](LICENSE).

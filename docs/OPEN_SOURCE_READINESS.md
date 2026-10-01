@@ -1,6 +1,6 @@
 # Open-source readiness
 
-Status: **source tree prepared, public push not yet recommended until the license decision is made.**
+Status: **the source tree is public and carries the chosen license (MIT). Release policy is still open.**
 
 ## Completed in the repository
 
@@ -14,10 +14,11 @@ Status: **source tree prepared, public push not yet recommended until the licens
 - The runtime no longer falls back to a developer-specific absolute product path.
 - The retired V0/shadow Windows adapter is removed from the Cargo workspace and excluded from Git.
 - README now reflects the actual Windows-only implementation.
+- MIT license in place (`LICENSE`), and the README license section states it.
 
 ## Blocking before a public repository
 
-1. **Choose a license.** Recommended candidates for a small developer tool are MIT or Apache-2.0; the project owner must choose.
+1. ~~Choose a license.~~ Chosen: **MIT** — `LICENSE`.
 2. Decide the final GitHub repository name and description.
 3. Decide whether releases will be source-only initially or include unsigned Windows binaries.
 
