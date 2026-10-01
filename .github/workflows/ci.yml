@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust format
+        run: cargo fmt --all -- --check
+      - name: Rust tests
+        run: cargo test --workspace --locked
+      - name: PowerShell correlation tests
+        shell: powershell
+        run: |
+          .\tests\test-plain-correlation.ps1
+          .\tests\test-reply-body.ps1
+      - name: Adapter contract, encoding and anchor tests
+        shell: powershell
+        run: |
+          .\tests\test-script-encoding.ps1
+          .\tests\test-adapter-config.ps1
+          .\tests\test-bootstrap-firstrun.ps1
+          .\tests\test-claude-anchor-stability.ps1
+      # State-only: no instance runs in CI, so the script skips its observation half.
+      # It still validates the state-machine invariants against whatever runtime state
+      # is present, and exits 0 cleanly when there is none.
+      - name: Runtime coherence invariants
+        shell: powershell
+        run: .\tests\test-runtime-coherence.ps1 -SkipObservers
+      - name: Build isolated integration runtime
+        run: cargo build --release --locked -p handoff-runtime --target-dir target/draft-first
+      - name: Staged delivery integration
+        run: python tests/staged-flow-integration.py
+      - name: Occupied-draft integration
+        run: python tests/test-preparation-hold-integration.py

@@ -1,0 +1,11 @@
+{
+  "enabled": false,
+  "poll_seconds": 60,
+  "dispatch_delay_seconds": 10,
+  "dsh_data_home": "C:\\path\\to\\DeepSeekHarness\\data",
+  "dsh_web_origin": "http://127.0.0.1:3080",
+  "dsh_browser_processes": ["msedge", "chrome"],
+  "workspace": "",
+  "claude_host": "claude.ai",
+  "dsh_page_title_pattern": "DeepSeek Harness"
+}

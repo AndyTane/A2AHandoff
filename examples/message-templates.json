@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "to_dsh": {
+    "prefix": "读取 DSH_TASKS.MD 并执行。",
+    "suffix": ""
+  },
+  "to_claude": {
+    "prefix": "DSH 已回复:\n[",
+    "suffix": "]"
+  }
+}

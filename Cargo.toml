@@ -1,0 +1,3 @@
+[workspace]
+resolver = "2"
+members = ["crates/handoff-core", "crates/handoff-adapter-api", "crates/handoff-runtime", "crates/a2a-ui-windows"]

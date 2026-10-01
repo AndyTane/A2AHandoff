@@ -1,0 +1,12 @@
+* text=auto
+*.rs text eol=lf
+*.toml text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.mjs text eol=lf
+*.py text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.ps1 text eol=crlf
+# Resource scripts: CRLF matches the Windows tooling that consumes them (rc.exe).
+*.rc text eol=crlf
