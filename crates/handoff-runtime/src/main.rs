@@ -314,6 +314,9 @@ fn restore_waiting_phase(w: &mut Value) {
 }
 fn restore_listener(w: &mut Value, d: &Value, c: &Value) {
     w["pending"] = Value::Null;
+    // 监听 is the user saying "start from here", which answers any record of an unfinished
+    // handoff left by a binding change.
+    w["interrupted"] = Value::Null;
     w["dsh_user_seq"] = d["user_seq"].clone();
     w["dsh_answer_seq"] = d["last_question_answer_seq"].clone();
     w["claude_anchor_index"] = c["latest_user_index"].clone();
@@ -375,6 +378,40 @@ fn consume(w: &mut Value, p: &Value) {
     } else {
         w["claude_floor"] = p["source_seq"].clone();
     }
+}
+/// Carry across a binding change the delivery that the reset would otherwise erase.
+///
+/// `blank()` drops the pending and the ledger, so an in-flight handoff used to disappear without
+/// a trace while its draft could still be sitting in the target's input box. The record is kept
+/// in the new workflow, published as the status text, and cleared by the next commit or by
+/// 监听 - what it buys is that the round can be re-sent by hand instead of vanishing silently.
+///
+/// Only an unfinished delivery is worth recording: a pending, or a last delivery whose submit was
+/// never confirmed. A confirmed `sent` needs no note, and an explicitly cancelled one was the
+/// user's own decision.
+fn remember_interrupted(next: &mut Value, old: &Value) {
+    let p = &old["pending"];
+    let last = &old["last_delivery"];
+    let direction = if !p.is_null() {
+        text(p, "direction")
+    } else if matches!(text(last, "state"), "submit_uncertain" | "send_attempted") {
+        text(last, "direction")
+    } else {
+        return;
+    };
+    let target = if direction == "DSH_TO_CLAUDE" {
+        "Claude"
+    } else {
+        "DSH"
+    };
+    next["interrupted"] = json!({
+        "direction":direction,
+        "id": if p.is_null() { last["id"].clone() } else { p["id"].clone() },
+        "at_ms":now(),
+    });
+    next["notice"] = json!(format!(
+        "绑定已更换：上一笔发送给 {target} 的交接没有结束，已记录；草稿可能仍在目标窗口，可点「发送给 {target}」补发。"
+    ));
 }
 /// Finishes a decision an older build left half-made: consuming the source of a delivery that
 /// the human took over.
@@ -836,6 +873,18 @@ fn publish(
                 "填入成功后倒计时；最终只提交一次。".into()
             },
         )
+    } else if !w["interrupted"].is_null() {
+        // A binding change erased a delivery that had not finished; say so until the next
+        // delivery commits or 监听 is pressed, instead of letting it pass unmentioned.
+        let target = if text(&w["interrupted"], "direction") == "DSH_TO_CLAUDE" {
+            "Claude"
+        } else {
+            "DSH"
+        };
+        (
+            "上一笔交接未完成".into(),
+            format!("更换绑定前有一笔发送给 {target} 的交接没有结束，草稿可能仍在目标窗口；可点「发送给 {target}」补发。"),
+        )
     } else if !error.is_empty() {
         (
             "交接暂缓，等待核验".into(),
@@ -923,6 +972,9 @@ fn publish(
 fn commit_receipt(w: &mut Value, p: &Value, r: &Value) {
     record(w, p, text(r, "state"));
     w["pending"] = Value::Null;
+    // Whatever the binding change had left unmentioned is answered as soon as a delivery
+    // finishes: the window must not keep reporting an unfinished handoff that just finished.
+    w["interrupted"] = Value::Null;
     // `claude_reply_index` is recorded so the status text can tell "Claude already
     // answered this handover" from "Claude still owes an answer".
     w["last_delivery"] = json!({"id":p["id"],"direction":p["direction"],"state":r["state"],"source_turn":p["source_turn"],"claude_reply_index":p["claude_reply_index"],"at_ms":now()});
@@ -1126,7 +1178,15 @@ fn entry() -> Result<(), String> {
         if let Some(new) = read(&home.join("bindings.json")) {
             if new != b {
                 b = new;
-                w = blank(&b);
+                // Record what the reset would erase: a delivery that was in flight, or one whose
+                // submit was never confirmed, simply vanished from the window's point of view -
+                // while its draft could still be sitting in the target's input box. The record
+                // survives the reset and is published as the status text until the next delivery
+                // commits or the listener is restored, so the round can at least be re-sent by
+                // hand instead of disappearing without a word.
+                let mut next = blank(&b);
+                remember_interrupted(&mut next, &w);
+                w = next;
                 nd = 0;
                 nc = 0;
                 error.clear();
@@ -1492,6 +1552,73 @@ mod live_tests {
         assert_ne!(hash("A\nB"), hash("A\nC"), "a changed word is a change");
         assert_ne!(hash("A\nB"), hash("A B"), "a missing line is a change");
         assert_ne!(hash("A\nB"), hash("ab"), "case is a change");
+    }
+    /// A binding change must not erase an unfinished delivery without a word.
+    ///
+    /// `blank()` drops the pending and the ledger, so an in-flight handoff vanished - while its
+    /// draft could still be sitting in the target's input box. It is recorded across the reset,
+    /// published as the status text, and cleared by the next commit or by 监听.
+    #[test]
+    fn a_binding_change_records_the_delivery_it_interrupts() {
+        let (b, d, c, mut old) = fixture();
+        adopt(&mut old, &d, &c, "DSH_TO_CLAUDE");
+        old["pending"] = candidate_for(
+            &MessageTemplates::default(),
+            &old,
+            &b,
+            &d,
+            &c,
+            0,
+            false,
+            Some("DSH_TO_CLAUDE"),
+        )
+        .unwrap();
+
+        // An armed delivery is recorded, with the direction the reader needs.
+        let mut next = blank(&json!({"claude_session":"cse_new","dsh_session":"session-new"}));
+        remember_interrupted(&mut next, &old);
+        assert_eq!(text(&next["interrupted"], "direction"), "DSH_TO_CLAUDE");
+        assert!(
+            text(&next, "notice").contains("补发"),
+            "{}",
+            text(&next, "notice")
+        );
+
+        // So is one whose submit was never confirmed, with no pending left behind.
+        let mut unconfirmed = old.clone();
+        unconfirmed["pending"] = Value::Null;
+        unconfirmed["last_delivery"] =
+            json!({"id":"x","direction":"CLAUDE_TO_DSH","state":"submit_uncertain"});
+        let mut next2 = blank(&b);
+        remember_interrupted(&mut next2, &unconfirmed);
+        assert_eq!(text(&next2["interrupted"], "direction"), "CLAUDE_TO_DSH");
+
+        // Nothing to say for a delivery that finished, or one the user cancelled.
+        for state in ["sent", "cancelled", "draft_unverified"] {
+            let mut quiet = old.clone();
+            quiet["pending"] = Value::Null;
+            quiet["last_delivery"] = json!({"id":"x","direction":"DSH_TO_CLAUDE","state":state});
+            let mut fresh = blank(&b);
+            remember_interrupted(&mut fresh, &quiet);
+            assert!(
+                fresh["interrupted"].is_null(),
+                "{state} must not be reported as interrupted"
+            );
+        }
+
+        // It clears as soon as a delivery finishes, or when the listener is restored.
+        let mut w = old.clone();
+        remember_interrupted(&mut w, &old);
+        assert!(!w["interrupted"].is_null());
+        commit_receipt(
+            &mut w,
+            &old["pending"],
+            &json!({"state":"sent","anchor":{"claude_user_index":9,"claude_user_hash":"h"}}),
+        );
+        assert!(w["interrupted"].is_null(), "a finished delivery answers it");
+        remember_interrupted(&mut w, &old);
+        restore_listener(&mut w, &d, &c);
+        assert!(w["interrupted"].is_null(), "监听 answers it too");
     }
     /// A receipt that does not say WHERE the delivery landed must not be recorded as sent.
     #[test]
