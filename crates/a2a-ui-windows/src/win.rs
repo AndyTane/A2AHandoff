@@ -145,6 +145,16 @@ fn fit_dpi(real: u32, work_width: i32) -> u32 {
     (scaled as u32).clamp(96, real)
 }
 
+/// How long to wait before starting another runtime, per consecutive failure.
+///
+/// Short at first so a one-off death costs seconds, then long enough that a runtime which
+/// dies on startup every time cannot spin the machine.
+fn respawn_delay(failures: u32) -> Duration {
+    const BACKOFF_SECONDS: [u64; 4] = [5, 15, 45, 120];
+    let step = (failures.saturating_sub(1) as usize).min(BACKOFF_SECONDS.len() - 1);
+    Duration::from_secs(BACKOFF_SECONDS[step])
+}
+
 /// The one size a window may have: the design at the current scale, plus its frame.
 ///
 /// `CONTENT_HEIGHT` is a fixed 480 DIP and only the *scale* follows the client width, so
@@ -518,6 +528,11 @@ struct App {
     hover: usize,
     spinning: bool,
     started: Instant,
+    /// The runtime this window owns, once started. Held here (not in `run`) so the window
+    /// can start a new one if it dies - see `ensure_runtime`.
+    runtime: Option<RuntimeOwner>,
+    respawn_failures: u32,
+    respawn_at: Option<Instant>,
 }
 impl App {
     unsafe fn new(product: PathBuf, dpi: u32, demo: Option<String>) -> Self {
@@ -579,6 +594,9 @@ impl App {
             hover: 0,
             spinning: false,
             started: Instant::now(),
+            runtime: None,
+            respawn_failures: 0,
+            respawn_at: None,
         }
     }
     fn say(&mut self, variant: Variant, title: &str, detail: &str) {
@@ -847,7 +865,39 @@ impl App {
                 self.set_edit();
             }
         }
+        self.ensure_runtime();
         self.rebuild(hwnd, false);
+    }
+    /// Starts a new runtime when the one this window owns has exited.
+    ///
+    /// Without it the window could only *report* the loss: the 监听 toggle is enabled only
+    /// while the heartbeat is fresh, so a dead runtime left restarting the whole app as the
+    /// only way back (observed when a locked `state.json` killed it and the window sat on
+    /// 心跳过期 / 已停止监听). Backs off so a runtime that keeps dying cannot spin, and
+    /// forgets the backoff as soon as a heartbeat comes back.
+    unsafe fn ensure_runtime(&mut self) {
+        if self.runtime.is_none() {
+            return; // demo mode owns no runtime
+        }
+        let exited = {
+            let owner = self.runtime.as_mut().expect("checked above");
+            matches!(owner.0.try_wait(), Ok(Some(_)))
+        };
+        if !exited {
+            if self.watcher_alive {
+                self.respawn_failures = 0;
+                self.respawn_at = None;
+            }
+            return;
+        }
+        if self.respawn_at.is_some_and(|at| Instant::now() < at) {
+            return;
+        }
+        self.respawn_failures = self.respawn_failures.saturating_add(1);
+        self.respawn_at = Some(Instant::now() + respawn_delay(self.respawn_failures));
+        if let Ok(owner) = RuntimeOwner::start(&self.product) {
+            self.runtime = Some(owner);
+        }
     }
     unsafe fn set_edit(&mut self) {
         if let Some(&h) = self.controls.get(&view::ID_VALUE) {
@@ -2433,7 +2483,7 @@ pub fn run() -> Result<(), String> {
         } else {
             None
         };
-        let _runtime = if demo.is_none() {
+        let runtime = if demo.is_none() {
             Some(RuntimeOwner::start(&product)?)
         } else {
             None
@@ -2450,6 +2500,8 @@ pub fn run() -> Result<(), String> {
         );
         let dpi = fit_dpi(dpi, work.right - work.left);
         let mut app = Box::new(App::new(product, dpi, demo));
+        // Owned by the window from here on, so it can be replaced if it dies.
+        app.runtime = runtime;
         app.snapshot.demo_enabled = args.iter().any(|a| a == "--demo-enabled");
         let instance = GetModuleHandleW(None).map_err(|e| e.to_string())?;
         let class = w!("A2AHandoff.Product.UI.v2");
@@ -2598,5 +2650,17 @@ mod fit_tests {
         assert!(large > small, "{large} should exceed {small}");
         // And it is not minimisable away: the pinned size never drops below the design.
         assert!(small >= crate::view::px(crate::view::DEFAULT_WIDTH, 96));
+    }
+
+    /// The respawn backoff starts short and grows to a cap: a one-off death should cost
+    /// seconds, but a runtime that dies on every start must not spin the machine.
+    #[test]
+    fn respawn_backoff_grows_and_then_holds() {
+        assert_eq!(respawn_delay(1), Duration::from_secs(5));
+        assert_eq!(respawn_delay(2), Duration::from_secs(15));
+        assert_eq!(respawn_delay(3), Duration::from_secs(45));
+        assert_eq!(respawn_delay(4), Duration::from_secs(120));
+        assert_eq!(respawn_delay(9), Duration::from_secs(120));
+        assert_eq!(respawn_delay(u32::MAX), Duration::from_secs(120));
     }
 }
