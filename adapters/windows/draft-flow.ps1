@@ -39,8 +39,14 @@ try{
  if([string]::IsNullOrWhiteSpace($script:r.text)){throw 'EMPTY_INSTRUCTION_NOT_SENT'}
  $script:receipt=Join-Path $ProductRoot ('runtime/receipts/'+$script:r.id+'.json')
  $previous=if(Test-Path -LiteralPath $script:receipt){Read-V1 $script:receipt}else{$null}
+ # A deliberate click may re-run a draft that was never verified: `draft_unverified` is
+ # written when the write could not be read back, i.e. before anything is submitted, so
+ # nothing reached the peer and re-running cannot duplicate a message. Every state that might
+ # have gone out - send_attempted, submit_uncertain, sent - stays refused, and so does an
+ # automatic request, which is what this guard exists for.
+ $retryUnverified=$script:r.manual -and $null -ne $previous -and $previous.state -eq 'draft_unverified'
  if($null -ne $previous){
-  if((Get-Field $previous 'flow' '') -cne 'draft-first-v1' -or $previous.state -ne 'draft_ready'){throw 'DELIVERY_ALREADY_ATTEMPTED_NO_RETRY'}
+  if((Get-Field $previous 'flow' '') -cne 'draft-first-v1' -or ($previous.state -ne 'draft_ready' -and -not $retryUnverified)){throw 'DELIVERY_ALREADY_ATTEMPTED_NO_RETRY'}
   if($previous.outgoing_hash -cne (Hash-Message $script:r.text)){throw 'DRAFT_REQUEST_CHANGED'}
   $script:readyAt=$previous.draft_ready_at_ms;$script:deadline=$previous.deadline_ms
  }
@@ -53,9 +59,13 @@ try{
   if($same.Count -ne 1 -or $same[0] -cne $script:b.dsh_session){throw 'DSH_TITLE_IDENTITY_NOT_UNIQUE'}
  }
  if($Operation -eq 'Prepare'){
-  if($null -ne $previous){
+  if($null -ne $previous -and -not $retryUnverified){
    if(-not (Test-ExactDraft $m $script:r.text)){throw 'DRAFT_EDITED_SEND_CANCELLED'}
   }else{
+   # First attempt, or a deliberate retry of a draft that was never verified - the box may
+   # still hold what the failed write left behind, in which case Set-PlainOwnedDraft refuses
+   # with DRAFT_OCCUPIED_PRESERVED rather than overwriting it, and the window says to clear
+   # the input first.
    Set-PlainOwnedDraft $m $script:r.text {Assert-ActiveDelivery;Receipt 'draft_write_attempted'}
   }
   Assert-ActiveDelivery
