@@ -77,13 +77,26 @@ fn publish_state(root: &Path, doc: &Value) {
         &json!({"error": last}),
     );
 }
+/// The ONE text normalisation, shared with the adapters.
+///
+/// `adapters/windows/draft-primitives.ps1` implements exactly these steps in
+/// `Normalize-Message`, and the two are compared against each other: the runtime stores
+/// `source_hash` and the adapter recomputes it before writing a draft. So if this changes,
+/// that must change with it. It did not on 2026-10-01 - the adapter learned to ignore
+/// per-line trailing whitespace, this did not, and every Claude reply containing a line
+/// ending in a space was refused as `CLAUDE_REPLY_CHANGED` although nothing had changed.
+///
+/// The rule: line endings and per-line trailing whitespace are re-encoded by the target
+/// editors, and BOM / zero-width characters are invisible. Nothing else is forgiven.
 fn hash(s: &str) -> String {
-    hex::encode(Sha256::digest(
-        s.replace("\r\n", "\n")
-            .replace('\r', "\n")
-            .trim()
-            .as_bytes(),
-    ))
+    let unified = s.replace("\r\n", "\n").replace('\r', "\n");
+    let trimmed = unified
+        .split('\n')
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let cleaned = trimmed.replace(['\u{FEFF}', '\u{200B}'], "");
+    hex::encode(Sha256::digest(cleaned.trim().as_bytes()))
 }
 fn binding_key(b: &Value) -> String {
     hash(&b.to_string())
@@ -1388,6 +1401,25 @@ mod live_tests {
         let c = json!({"ok":true,"latest_user_index":5,"latest_user_hash":"human-hash","ui_message_index":6,"reply_available":true,"reply_text":"previous instruction"});
         let w = blank(&b);
         (b, d, c, w)
+    }
+    /// The runtime and the adapters must agree on what "the same text" means.
+    ///
+    /// The adapter recomputes `source_hash` with `Hash-Message` before it writes a draft, so
+    /// any drift between the two normalisations reads as "the reply changed" although nothing
+    /// did. This fixture - CRLF, per-line trailing spaces, a BOM, a zero-width space - is
+    /// pinned to the same digest in tests/test-draft-readback.ps1, so a change on either side
+    /// fails on both.
+    #[test]
+    fn text_normalisation_matches_the_adapters() {
+        let fixture = "A  \r\nB\u{FEFF}\u{200B}\r\n   \r\nC  ";
+        assert_eq!(
+            hash(fixture),
+            "515d303ff7d38d7ea89acc4a4bfa65dca39d7b0c65cd369da110781ba875d959"
+        );
+        // Exactly those things are forgiven, and nothing else.
+        assert_ne!(hash("A\nB"), hash("A\nC"), "a changed word is a change");
+        assert_ne!(hash("A\nB"), hash("A B"), "a missing line is a change");
+        assert_ne!(hash("A\nB"), hash("ab"), "case is a change");
     }
     #[test]
     fn fresh_install_never_auto_sends_history() {

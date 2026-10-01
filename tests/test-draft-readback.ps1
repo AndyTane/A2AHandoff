@@ -29,6 +29,15 @@ Check 'inner_spaces_still_matter' ((Normalize-Message 'a  b') -ceq (Normalize-Me
 Check 'case_still_matters' ((Normalize-Message 'Ab') -ceq (Normalize-Message 'ab')) $false
 Check 'a_missing_line_still_matters' ((Normalize-Message "a`nb") -ceq (Normalize-Message 'a b')) $false
 
+# This digest is shared with the runtime: crates/handoff-runtime/src/main.rs has
+# `text_normalisation_matches_the_adapters` asserting the same constant for the same fixture.
+# The two sides compare these hashes against each other (`source_hash`), so a change to the
+# rule on one side only shows up as CLAUDE_REPLY_CHANGED although nothing changed - which is
+# exactly what happened on 2026-10-01. Neither side may drift without failing here.
+$shared = "A  `r`nB" + [string][char]0xFEFF + [string][char]0x200B + "`r`n   `r`nC  "
+Check 'the_normalisation_rule_is_shared_with_the_runtime' `
+    (Hash-Message $shared) '515d303ff7d38d7ea89acc4a4bfa65dca39d7b0c65cd369da110781ba875d959'
+
 # The diagnostic reports both sizes and the first divergence, with context.
 $same = Compare-DraftText "line`nline" "line`r`nline"
 Check 'identical_after_normalisation_reports_lengths' ($same -match '^written=9 read=9 first_diff=9 ') $true
