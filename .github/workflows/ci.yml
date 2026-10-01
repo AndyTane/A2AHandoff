@@ -18,6 +18,7 @@ jobs:
         run: |
           .\tests\test-plain-correlation.ps1
           .\tests\test-reply-body.ps1
+          .\tests\test-draft-readback.ps1
       - name: Adapter contract, encoding and anchor tests
         shell: powershell
         run: |

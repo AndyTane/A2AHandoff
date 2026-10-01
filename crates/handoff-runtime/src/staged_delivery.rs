@@ -249,7 +249,15 @@ pub(super) fn drive(
             if text(&r, "state") == "sent" {
                 error.clear()
             } else {
-                *error = format!("本次已停止：{}", text(&result, "error"))
+                // The adapter attaches what differed when it could not verify a draft, so
+                // the window explains the hold instead of only naming it.
+                let code = text(&result, "error").to_string();
+                let detail = text(&result, "detail").to_string();
+                *error = if detail.is_empty() {
+                    format!("本次已停止：{code}")
+                } else {
+                    format!("本次已停止：{code}（{detail}）")
+                }
             }
         }
     } else {

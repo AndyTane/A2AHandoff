@@ -35,7 +35,7 @@ function Set-PlainOwnedDraft($M,[string]$Expected,[scriptblock]$BeforeWrite) {
  if(($M.Document.Current.Name -like ('*'+$M.TitlePattern+'*')) -and $M.Edit.Current.ClassName -match '(^|_)input$'){
   . (Join-Path $PSScriptRoot 'dsh-keyboard-input.ps1')
   $null=Set-ComposerDraft $M $Expected $BeforeWrite
-  if(-not (Test-ExactDraft $M $Expected)){throw 'DRAFT_WRITE_UNVERIFIED'}
+  if(-not (Test-ExactDraft $M $Expected)){$script:draftDiff=Compare-DraftText $Expected (Read-ComposerText $M);throw 'DRAFT_WRITE_UNVERIFIED'}
   return
  }
  & $BeforeWrite
@@ -46,6 +46,7 @@ function Set-PlainOwnedDraft($M,[string]$Expected,[scriptblock]$BeforeWrite) {
   Start-Sleep -Milliseconds 100;Assert-ComposerIdentity $M
   if(Test-ExactDraft $M $Expected){return}
  }
+ $script:draftDiff=Compare-DraftText $Expected (Read-ComposerText $M)
  throw 'DRAFT_WRITE_UNVERIFIED'
 }
 function Submit-VerifiedDraft($M,[string]$Expected,[scriptblock]$BeforeSend) {

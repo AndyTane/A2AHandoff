@@ -115,9 +115,15 @@ if (-not $SkipObservers) {
         Check 'dsh_after_seq <= live last_seq' ([long]$wf.dsh_after_seq -le [long]$dsh.last_seq) `
             "after=$($wf.dsh_after_seq) last=$($dsh.last_seq)"
         if ($null -ne $dsh.result) {
-            Check 'a completed result is either delivered or pending' `
-                (([long]$dsh.result.end_seq -le [long]$wf.dsh_after_seq) -or ($null -ne $wf.pending)) `
-                "end_seq=$($dsh.result.end_seq) after=$($wf.dsh_after_seq)"
+            # Three legitimate outcomes, not two: delivered, still pending, or held with the
+            # runtime stopped. A `draft_unverified`/`submit_uncertain` hold is deliberately
+            # unresolved - the window says so and the runtime refuses to resend blind - so
+            # counting it as "the result vanished" was a false alarm.
+            $held = ($wf.phase -eq 'hold_send_uncertain') -and
+                (@('draft_unverified', 'submit_uncertain', 'send_attempted') -contains [string]$wf.last_delivery.state)
+            Check 'a completed result is delivered, pending or explicitly held' `
+                ((([long]$dsh.result.end_seq -le [long]$wf.dsh_after_seq) -or ($null -ne $wf.pending) -or $held)) `
+                "end_seq=$($dsh.result.end_seq) after=$($wf.dsh_after_seq) phase=$($wf.phase) last=$($wf.last_delivery.state)"
         }
         Check 'claude_floor <= live ui_message_index' ([long]$wf.claude_floor -le [long]$claude.ui_message_index) `
             "floor=$($wf.claude_floor) ui=$($claude.ui_message_index)"

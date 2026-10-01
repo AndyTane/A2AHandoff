@@ -1,4 +1,4 @@
-﻿# Stage and commit are separate invocations; this process never owns a countdown loop.
+# Stage and commit are separate invocations; this process never owns a countdown loop.
 param([Parameter(Mandatory=$true)][string]$ProductRoot,[Parameter(Mandatory=$true)][string]$RequestFile,[Parameter(Mandatory=$true)][ValidateSet('Prepare','Commit')][string]$Operation)
 . "$PSScriptRoot\draft-context.ps1"
 . "$PSScriptRoot\composer-draft.ps1"
@@ -17,7 +17,11 @@ function Assert-ActiveDelivery {
  }
 }
 function Receipt($state,$anchor=$null){
- Write-V1 $script:receipt ([ordered]@{id=$script:r.id;flow='draft-first-v1';state=$state;direction=$script:r.direction;source_hash=$script:r.source_hash;source_seq=$script:r.source_seq;source_turn=$script:r.source_turn;claude_session=$script:r.claude_session;dsh_session=$script:r.dsh_session;outgoing_hash=(Hash-Message $script:r.text);at_ms=(Now-Ms);draft_ready_at_ms=$script:readyAt;deadline_ms=$script:deadline;anchor=$anchor})
+ $m=[ordered]@{id=$script:r.id;flow='draft-first-v1';state=$state;direction=$script:r.direction;source_hash=$script:r.source_hash;source_seq=$script:r.source_seq;source_turn=$script:r.source_turn;claude_session=$script:r.claude_session;dsh_session=$script:r.dsh_session;outgoing_hash=(Hash-Message $script:r.text);at_ms=(Now-Ms);draft_ready_at_ms=$script:readyAt;deadline_ms=$script:deadline;anchor=$anchor}
+ # Only present when a draft could not be verified: what differed, so the receipt explains
+ # the hold instead of just naming it.
+ if($script:draftDiff){$m['write_detail']=$script:draftDiff}
+ Write-V1 $script:receipt $m
 }
 $mutex=[Threading.Mutex]::new($false,'Local\A2AHandoff.V1.MessageIO');$owned=$false
 $script:readyAt=0;$script:deadline=0;$script:receipt=''
@@ -89,5 +93,8 @@ try{
   if($last.state -eq 'draft_ready' -and $problem -ne 'COUNTDOWN_NOT_FINISHED'){Receipt 'cancelled_before_send'}
   elseif($last.state -eq 'draft_write_attempted'){Receipt 'draft_unverified'}
  }
- [Console]::WriteLine((@{ok=$false;error=$problem;state='hold'}|ConvertTo-Json -Compress));exit 1
+ # The diff, when there is one, goes to stderr as well so it is visible in the adapter log
+ # even if the caller only reports the code.
+ if($script:draftDiff){[Console]::Error.WriteLine(('draft_write_unverified '+$script:draftDiff))}
+ [Console]::WriteLine((@{ok=$false;error=$problem;state='hold';detail=$script:draftDiff}|ConvertTo-Json -Compress));exit 1
 }finally{if($owned){$mutex.ReleaseMutex()};$mutex.Dispose()}
