@@ -29,14 +29,28 @@ Check 'inner_spaces_still_matter' ((Normalize-Message 'a  b') -ceq (Normalize-Me
 Check 'case_still_matters' ((Normalize-Message 'Ab') -ceq (Normalize-Message 'ab')) $false
 Check 'a_missing_line_still_matters' ((Normalize-Message "a`nb") -ceq (Normalize-Message 'a b')) $false
 
-# This digest is shared with the runtime: crates/handoff-runtime/src/main.rs has
-# `text_normalisation_matches_the_adapters` asserting the same constant for the same fixture.
-# The two sides compare these hashes against each other (`source_hash`), so a change to the
-# rule on one side only shows up as CLAUDE_REPLY_CHANGED although nothing changed - which is
-# exactly what happened on 2026-10-01. Neither side may drift without failing here.
+# This digest is shared by THREE implementations that are compared against each other:
+#   crates/handoff-runtime/src/main.rs        hash()            (live_tests::text_normalisation_matches_the_adapters)
+#   adapters/windows/draft-primitives.ps1     Normalize-Message (the check below)
+#   adapters/dsh/observe.mjs                  hash              (the node check below)
+# A drift in any one of them is read as "the message changed" - DSH_RESULT_CHANGED looping
+# forever, or submit_uncertain recorded for a message that did arrive. That is exactly what
+# happened on 2026-10-01, twice: first the runtime's copy was missed, then observe.mjs's.
+$sharedDigest = '515d303ff7d38d7ea89acc4a4bfa65dca39d7b0c65cd369da110781ba875d959'
 $shared = "A  `r`nB" + [string][char]0xFEFF + [string][char]0x200B + "`r`n   `r`nC  "
-Check 'the_normalisation_rule_is_shared_with_the_runtime' `
-    (Hash-Message $shared) '515d303ff7d38d7ea89acc4a4bfa65dca39d7b0c65cd369da110781ba875d959'
+Check 'the_normalisation_rule_is_shared_with_the_runtime' (Hash-Message $shared) $sharedDigest
+
+# The JavaScript copy. Importing the module has no side effects: its body only runs when it is
+# invoked directly, so this hashes the fixture without touching any session.
+$root = Split-Path $PSScriptRoot -Parent
+$observer = (Join-Path $root 'adapters/dsh/observe.mjs').Replace('\', '/')
+$js = "import('file:///$observer').then(m=>console.log(m.hash('A  \r\nB\uFEFF\u200B\r\n   \r\nC  ')))"
+if (Get-Command node.exe -ErrorAction SilentlyContinue) {
+    $observed = (& node.exe -e $js 2>&1 | Select-Object -Last 1)
+    Check 'the_normalisation_rule_is_shared_with_the_dsh_observer' ([string]$observed).Trim() $sharedDigest
+} else {
+    Write-Output 'WARNING: node.exe not found, so the DSH observer hash was not checked.'
+}
 
 # The diagnostic reports both sizes and the first divergence, with context.
 $same = Compare-DraftText "line`nline" "line`r`nline"

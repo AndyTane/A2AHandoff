@@ -4,7 +4,22 @@ import {join,resolve} from 'node:path';
 import {createHash} from 'node:crypto';
 import {readRows} from './read-log.mjs';
 import {readRuntimeConfig,dshDataHome,workspace} from '../common/a2a-config.mjs';
-export const hash=text=>createHash('sha256').update(text.replace(/\r\n?/g,'\n').trim()).digest('hex');
+// ONE text normalisation, shared with the runtime's `hash()` (crates/handoff-runtime/src/main.rs)
+// and the adapters' `Normalize-Message` (adapters/windows/draft-primitives.ps1).
+//
+// All three are compared against each other: `result.hash` against the runtime's `source_hash`,
+// and `user_hash` against `Hash-Message` when a Claude -> DSH submit is confirmed. A drift here
+// is read as "the message changed": the DSH -> Claude direction loops forever on
+// DSH_RESULT_CHANGED, and the Claude -> DSH direction writes `submit_uncertain` for a message
+// that did arrive - which is terminal, with no recovery path. It happened once already (the
+// PowerShell and Rust copies were fixed and this one was missed).
+//
+// The rule: line endings and per-line trailing whitespace are re-encoded by the target editors,
+// and BOM / zero-width characters are invisible. Nothing else is forgiven.
+// tests/test-draft-readback.ps1 pins all three implementations to one digest of one fixture.
+export const hash=text=>createHash('sha256').update(
+ String(text).replace(/\r\n?/g,'\n').split('\n').map(line=>line.trimEnd()).join('\n')
+  .replace(/[\uFEFF\u200B]/g,'').trim()).digest('hex');
 export function observe(product){
  const read=p=>JSON.parse(readFileSync(p,'utf8').replace(/^\uFEFF/,''));
  const cfg=readRuntimeConfig(product), b=read(join(product,'runtime/bindings.json'));
