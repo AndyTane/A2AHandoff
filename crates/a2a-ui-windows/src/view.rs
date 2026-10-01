@@ -604,6 +604,18 @@ fn retry_button() -> BannerButton {
         enabled: true,
     }
 }
+/// The one hold the user can clear themselves.
+///
+/// The adapter refuses to overwrite a target input that already has content, and the bare
+/// code (`DRAFT_OCCUPIED_PRESERVED`) says nothing about what to do about it - so the banner
+/// says it.
+fn occupied_hint(code: &str) -> String {
+    if code.starts_with("DRAFT_OCCUPIED") || code == "EXISTING_ATTACHMENT_PRESERVED" {
+        "目标输入框已有草稿，已保留；清空后再点重试。".to_owned()
+    } else {
+        String::new()
+    }
+}
 /// Text after the first full-width or ASCII colon, i.e. the raw error string.
 fn error_code(detail: &str) -> String {
     let cut = detail
@@ -841,6 +853,11 @@ pub fn derive(s: &Snapshot, watch_alive: bool, notice: Option<&Notice>, now: u64
         } else {
             "DSH"
         };
+        let code = if demo == Some("error") {
+            "SEND_UNCERTAIN: composer not confirmed".to_owned()
+        } else {
+            error_code(live_str(s, "detail"))
+        };
         Banner {
             variant: Variant::Error,
             title: if demo == Some("error") {
@@ -848,12 +865,8 @@ pub fn derive(s: &Snapshot, watch_alive: bool, notice: Option<&Notice>, now: u64
             } else {
                 live_str(s, "status_text").to_owned()
             },
-            desc: String::new(),
-            code: Some(if demo == Some("error") {
-                "SEND_UNCERTAIN: composer not confirmed".to_owned()
-            } else {
-                error_code(live_str(s, "detail"))
-            }),
+            desc: occupied_hint(&code),
+            code: Some(code),
             buttons: {
                 let mut b = vec![view_log_button()];
                 // The hold is deliberate: the runtime stopped rather than resend blind, and
@@ -2166,6 +2179,40 @@ mod tests {
                 "{state} may already be at the peer and must not offer a retry, got {ids:?}"
             );
         }
+    }
+    /// The occupied-input hold must say what to do, not only which code came back.
+    #[test]
+    fn an_occupied_input_explains_itself() {
+        let hold = |detail: &str| {
+            let mut s = Snapshot::for_demo("running");
+            s.demo = None;
+            s.live = json!({"mode":"live","phase":"hold_send_uncertain","sending":false,
+                "pending":null,"claude_ok":true,"dsh_ok":true,
+                "status_text":"交接暂缓，等待核验","detail":detail,
+                "last_delivery":{"state":"draft_unverified","direction":"DSH_TO_CLAUDE"},
+                "next_poll_at_ms":0});
+            derive(&s, true, None, 1_000).banner
+        };
+        for detail in [
+            "本次已停止：DRAFT_OCCUPIED_PRESERVED",
+            "本次已停止：DRAFT_OCCUPIED",
+            "本次已停止：EXISTING_ATTACHMENT_PRESERVED",
+        ] {
+            let b = hold(detail);
+            assert_eq!(
+                b.code.as_deref(),
+                Some(detail.trim_start_matches("本次已停止：")),
+                "the code stays visible for {detail}"
+            );
+            assert!(
+                b.desc.contains("清空后再点重试"),
+                "{detail} must say how to clear the hold, got '{}'",
+                b.desc
+            );
+        }
+        // Every other hold keeps the bare code and adds nothing.
+        let other = hold("本次已停止：DRAFT_WRITE_UNVERIFIED");
+        assert!(other.desc.is_empty(), "got '{}'", other.desc);
     }
     #[test]
     fn unbound_claude_card() {
