@@ -1024,6 +1024,7 @@ impl App {
             | view::ID_SEND_CLAUDE
             | view::ID_TOGGLE
             | view::ID_RESTORE
+            | view::ID_BANNER_RETRY
             | view::ID_CANCEL
                 if !self.demo =>
             {
@@ -1032,6 +1033,7 @@ impl App {
                     view::ID_SEND_CLAUDE => "send_claude",
                     view::ID_TOGGLE => "toggle",
                     view::ID_RESTORE => "restore_listener",
+                    view::ID_BANNER_RETRY => "retry_delivery",
                     _ => "cancel",
                 };
                 match model::request_command(&self.product, command) {

@@ -300,6 +300,23 @@ fn restore_listener(w: &mut Value, d: &Value, c: &Value) {
         )
     });
 }
+/// Which direction a 「重试本次投递」 click refers to, if the last delivery is one that may
+/// safely be re-run.
+///
+/// Only `draft_unverified` qualifies: the adapter refused before submitting anything, so
+/// nothing reached the peer and a retry cannot duplicate a message. `submit_uncertain` may
+/// already be delivered - re-sending that is exactly what the hold exists to prevent, and it
+/// has its own recovery path.
+fn retry_direction(w: &Value) -> Option<&'static str> {
+    if text(&w["last_delivery"], "state") != "draft_unverified" {
+        return None;
+    }
+    match text(&w["last_delivery"], "direction") {
+        "DSH_TO_CLAUDE" => Some("DSH_TO_CLAUDE"),
+        "CLAUDE_TO_DSH" => Some("CLAUDE_TO_DSH"),
+        _ => None,
+    }
+}
 fn manual_changed(w: &Value, d: &Value, c: &Value) -> bool {
     (yes(d, "ok")
         && (number(d, "user_seq") != number(w, "dsh_user_seq")
@@ -1148,7 +1165,7 @@ fn entry() -> Result<(), String> {
                     )?;
                     error.clear();
                 }
-                "send_claude" | "send_dsh" => {
+                "send_claude" | "send_dsh" | "retry_delivery" => {
                     if !w["pending"].is_null() {
                         // Auto handoff already armed this draft and is counting down.
                         // The click is the user confirming, so dispatch it now instead
@@ -1169,10 +1186,22 @@ fn entry() -> Result<(), String> {
                         error = "会话尚不可读取，请打开绑定窗口。".into();
                         continue;
                     }
-                    let dir = if text(&cmd, "command") == "send_claude" {
-                        "DSH_TO_CLAUDE"
-                    } else {
-                        "CLAUDE_TO_DSH"
+                    let dir = match text(&cmd, "command") {
+                        "send_claude" => "DSH_TO_CLAUDE",
+                        "send_dsh" => "CLAUDE_TO_DSH",
+                        // 「重试本次投递」 is a click on the button that failed: the same
+                        // handoff, rebuilt from the same source, with the click as its
+                        // confirmation. See `retry_direction` for why only an unverified
+                        // draft may be re-run.
+                        _ => match retry_direction(&w) {
+                            Some(dir) => dir,
+                            None => {
+                                error =
+                                    "上一笔不是未送达的草稿，未重试；如要重发请直接点击对应按钮。"
+                                        .into();
+                                continue;
+                            }
+                        },
                     };
                     if dir == "CLAUDE_TO_DSH" && yes(&d, "busy") {
                         error = "DSH 仍在执行，未追加任务。".into();
@@ -1656,6 +1685,36 @@ mod live_tests {
             revalidate_candidate(&MessageTemplates::default(), &w, &b, &d, &c, &automatic)
                 .expect("the automatic path still finds a handoff");
         assert_eq!(replanned["direction"], "DSH_TO_CLAUDE");
+    }
+    /// A retry may only re-run a draft the peer cannot have received.
+    #[test]
+    fn only_an_unverified_draft_may_be_retried() {
+        let with =
+            |state: &str, dir: &str| json!({"last_delivery": {"state": state, "direction": dir}});
+        assert_eq!(
+            retry_direction(&with("draft_unverified", "DSH_TO_CLAUDE")),
+            Some("DSH_TO_CLAUDE")
+        );
+        assert_eq!(
+            retry_direction(&with("draft_unverified", "CLAUDE_TO_DSH")),
+            Some("CLAUDE_TO_DSH")
+        );
+        // Everything else may already be at the peer, so it must not be re-sent blind.
+        for state in [
+            "submit_uncertain",
+            "send_attempted",
+            "sent",
+            "superseded_by_user",
+            "uncertain",
+        ] {
+            assert_eq!(
+                retry_direction(&with(state, "DSH_TO_CLAUDE")),
+                None,
+                "{state} must not be retried"
+            );
+        }
+        // Nothing to aim at.
+        assert_eq!(retry_direction(&with("draft_unverified", "")), None);
     }
     /// Abandoning a draft must consume the source it carried, or the result stays on offer
     /// forever while the status text claims it was delivered.

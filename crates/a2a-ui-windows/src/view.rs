@@ -23,6 +23,7 @@ pub const ID_TEMPLATES: usize = 304;
 pub const ID_RESTORE: usize = 305;
 pub const ID_BANNER_LOGS: usize = 306;
 pub const ID_BANNER_POLL: usize = 308;
+pub const ID_BANNER_RETRY: usize = 310;
 pub const ID_SETTINGS: usize = 309;
 
 pub const MIN_POLL: u64 = 1;
@@ -591,6 +592,18 @@ fn poll_button() -> BannerButton {
         enabled: true,
     }
 }
+/// Offered only while a delivery is held AND the peer cannot have received anything, so a
+/// retry cannot duplicate a message. The runtime enforces the same rule (`retry_direction`);
+/// this just keeps the button off the screen when it would be refused.
+fn retry_button() -> BannerButton {
+    BannerButton {
+        id: ID_BANNER_RETRY,
+        label: "重试本次投递",
+        icon: None,
+        ghost: false,
+        enabled: true,
+    }
+}
 /// Text after the first full-width or ASCII colon, i.e. the raw error string.
 fn error_code(detail: &str) -> String {
     let cut = detail
@@ -841,7 +854,23 @@ pub fn derive(s: &Snapshot, watch_alive: bool, notice: Option<&Notice>, now: u64
             } else {
                 error_code(live_str(s, "detail"))
             }),
-            buttons: vec![view_log_button()],
+            buttons: {
+                let mut b = vec![view_log_button()];
+                // The hold is deliberate: the runtime stopped rather than resend blind, and
+                // with `hold_send_uncertain` the send buttons are disabled, which left no way
+                // back to this particular handoff except re-baselining (which skips it).
+                // A draft the adapter never verified cannot have reached the peer, so it is
+                // the one case that may safely be re-run.
+                if s.live["last_delivery"]["state"] == "draft_unverified"
+                    && matches!(
+                        s.live["last_delivery"]["direction"].as_str(),
+                        Some("DSH_TO_CLAUDE" | "CLAUDE_TO_DSH")
+                    )
+                {
+                    b.insert(0, retry_button());
+                }
+                b
+            },
         }
     } else if demo_paused
         || claude_read_failed
@@ -2100,6 +2129,43 @@ mod tests {
             vec![ID_BANNER_POLL],
             "立即轮询 must stay available while the notice is shown"
         );
+    }
+    /// A held delivery may be retried only when nothing could have reached the peer.
+    ///
+    /// `draft_unverified` means the adapter refused before submitting anything, so re-running
+    /// it cannot duplicate a message. `submit_uncertain` may already be delivered, and
+    /// re-sending that is exactly what the hold exists to prevent.
+    #[test]
+    fn only_an_unverified_draft_offers_a_retry() {
+        let hold = |state: &str| {
+            let mut s = Snapshot::for_demo("running");
+            s.demo = None;
+            s.live = json!({"mode":"live","phase":"hold_send_uncertain","sending":false,
+                "pending":null,"claude_ok":true,"dsh_ok":true,
+                "status_text":"交接暂缓，等待核验",
+                "detail":"本次已停止：DRAFT_WRITE_UNVERIFIED",
+                "last_delivery":{"state":state,"direction":"DSH_TO_CLAUDE"},
+                "next_poll_at_ms":0});
+            derive(&s, true, None, 1_000).banner
+        };
+        let unverified = hold("draft_unverified");
+        let ids = unverified.buttons.iter().map(|b| b.id).collect::<Vec<_>>();
+        assert!(
+            ids.contains(&ID_BANNER_RETRY),
+            "an unverified draft must offer 重试本次投递, got {ids:?}"
+        );
+        assert!(
+            ids.contains(&ID_BANNER_LOGS),
+            "查看日志 stays available, got {ids:?}"
+        );
+
+        for state in ["submit_uncertain", "send_attempted", "sent", "uncertain"] {
+            let ids = hold(state).buttons.iter().map(|b| b.id).collect::<Vec<_>>();
+            assert!(
+                !ids.contains(&ID_BANNER_RETRY),
+                "{state} may already be at the peer and must not offer a retry, got {ids:?}"
+            );
+        }
     }
     #[test]
     fn unbound_claude_card() {
