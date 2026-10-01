@@ -295,6 +295,23 @@ fn override_with_manual_send(p: &mut Value) {
     // `drive` never reaches, and the button would look dead again.
     p["retry_after_ms"] = json!(0);
 }
+/// Give a held delivery back the waiting phase it belongs to.
+///
+/// `candidate_for` refuses any phase that is not `waiting_dsh`/`waiting_claude`, and a hold
+/// (`hold_send_uncertain`, `hold_preparation`) is neither. So a click that re-arms a held
+/// delivery without restoring the phase makes the revalidation inside `drive` find no
+/// candidate and CANCEL the very delivery the click was meant to send - while the window has
+/// already answered 操作已提交, so it reads as "the button did nothing". This is the same thing
+/// `adopt` does on the fresh-candidate path.
+fn restore_waiting_phase(w: &mut Value) {
+    if matches!(text(w, "phase"), "waiting_dsh" | "waiting_claude") {
+        return;
+    }
+    w["phase"] = json!(match text(&w["pending"], "direction") {
+        "CLAUDE_TO_DSH" => "waiting_claude",
+        _ => "waiting_dsh",
+    });
+}
 fn restore_listener(w: &mut Value, d: &Value, c: &Value) {
     w["pending"] = Value::Null;
     w["dsh_user_seq"] = d["user_seq"].clone();
@@ -1191,8 +1208,10 @@ fn entry() -> Result<(), String> {
                             let mut p = w["pending"].clone();
                             override_with_manual_send(&mut p);
                             w["pending"] = p;
+                            restore_waiting_phase(&mut w);
                             w["notice"] = json!("已按点击立即发送，跳过倒计时");
                         } else {
+                            restore_waiting_phase(&mut w);
                             w["notice"] = json!("本次已经排队，无需重复点击");
                         }
                         continue;
@@ -1401,6 +1420,31 @@ mod live_tests {
         let c = json!({"ok":true,"latest_user_index":5,"latest_user_hash":"human-hash","ui_message_index":6,"reply_available":true,"reply_text":"previous instruction"});
         let w = blank(&b);
         (b, d, c, w)
+    }
+    /// A click on a held delivery must restore the phase it will be revalidated in.
+    ///
+    /// The state that offers 「重试本次投递」 for an occupied input is `hold_preparation` with the
+    /// delivery kept, and `candidate_for` refuses a hold: without this the revalidation inside
+    /// `drive` cancels the delivery the click was meant to re-send.
+    #[test]
+    fn a_manual_override_restores_a_waiting_phase() {
+        let mut w = json!({"phase":"hold_preparation",
+            "pending":{"id":"p","direction":"CLAUDE_TO_DSH","stage":"waiting_target","retry_after_ms":9_999_999_999u64}});
+        let mut p = w["pending"].clone();
+        override_with_manual_send(&mut p);
+        w["pending"] = p;
+        restore_waiting_phase(&mut w);
+        assert_eq!(w["phase"], "waiting_claude", "candidate_for refuses a hold");
+        assert_eq!(number(&w["pending"], "retry_after_ms"), 0);
+
+        // The direction picks the side, and a waiting phase is left alone.
+        let mut to_claude =
+            json!({"phase":"hold_send_uncertain","pending":{"direction":"DSH_TO_CLAUDE"}});
+        restore_waiting_phase(&mut to_claude);
+        assert_eq!(to_claude["phase"], "waiting_dsh");
+        let mut already = json!({"phase":"waiting_claude","pending":{"direction":"DSH_TO_CLAUDE"}});
+        restore_waiting_phase(&mut already);
+        assert_eq!(already["phase"], "waiting_claude");
     }
     /// The runtime and the adapters must agree on what "the same text" means.
     ///

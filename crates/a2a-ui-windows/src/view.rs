@@ -616,6 +616,21 @@ fn occupied_hint(code: &str) -> String {
         String::new()
     }
 }
+/// What the reader can do about a paused handoff, given which buttons are live.
+///
+/// A hold is a dead end unless it says so: the runtime stops on purpose (the reply may already
+/// have reached the peer, or the user may have taken over) and never resumes by itself, so the
+/// window has to name the click that continues. Which click is derived from the same two flags
+/// the send buttons use, so the advice cannot contradict them.
+fn hold_hint(send_dsh: bool, send_claude: bool) -> String {
+    match (send_dsh, send_claude) {
+        (true, true) => "点「发送给 DSH」或「发送给 Claude」继续；或点「监听」重新取基线（不补发）",
+        (true, false) => "点「发送给 DSH」继续；或点「监听」重新取基线（不补发）",
+        (false, true) => "点「发送给 Claude」继续；或点「监听」重新取基线（不补发）",
+        (false, false) => "点「监听」重新取基线（本次不会补发）",
+    }
+    .to_owned()
+}
 /// Text after the first full-width or ASCII colon, i.e. the raw error string.
 fn error_code(detail: &str) -> String {
     let cut = detail
@@ -868,6 +883,13 @@ pub fn derive(s: &Snapshot, watch_alive: bool, notice: Option<&Notice>, now: u64
         } else {
             error_code(live_str(s, "detail"))
         };
+        // Offered only where the runtime would accept it: a deliberate retry is allowed for an
+        // unverified draft and nothing else, so the button and the advice agree.
+        let retry_offered = s.live["last_delivery"]["state"] == "draft_unverified"
+            && matches!(
+                s.live["last_delivery"]["direction"].as_str(),
+                Some("DSH_TO_CLAUDE" | "CLAUDE_TO_DSH")
+            );
         Banner {
             variant: Variant::Error,
             title: if demo == Some("error") {
@@ -875,7 +897,16 @@ pub fn derive(s: &Snapshot, watch_alive: bool, notice: Option<&Notice>, now: u64
             } else {
                 live_str(s, "status_text").to_owned()
             },
-            desc: occupied_hint(&code),
+            desc: {
+                let specific = occupied_hint(&code);
+                if !specific.is_empty() {
+                    specific
+                } else if retry_offered {
+                    "点「重试本次投递」重发本次；或点「监听」重新取基线（不补发）".to_owned()
+                } else {
+                    hold_hint(send_dsh, send_claude)
+                }
+            },
             code: Some(code),
             buttons: {
                 let mut b = vec![view_log_button()];
@@ -884,12 +915,7 @@ pub fn derive(s: &Snapshot, watch_alive: bool, notice: Option<&Notice>, now: u64
                 // back to this particular handoff except re-baselining (which skips it).
                 // A draft the adapter never verified cannot have reached the peer, so it is
                 // the one case that may safely be re-run.
-                if s.live["last_delivery"]["state"] == "draft_unverified"
-                    && matches!(
-                        s.live["last_delivery"]["direction"].as_str(),
-                        Some("DSH_TO_CLAUDE" | "CLAUDE_TO_DSH")
-                    )
-                {
+                if retry_offered {
                     b.insert(0, retry_button());
                 }
                 b
@@ -901,18 +927,25 @@ pub fn derive(s: &Snapshot, watch_alive: bool, notice: Option<&Notice>, now: u64
         || (available && live_str(s, "status_text") == "交接暂缓，等待核验")
     {
         let detail = live_str(s, "detail");
-        let (title, hint) = if claude_read_failed {
+        let (title, hint): (String, String) = if claude_read_failed {
             (
-                "交接已暂缓：无法读取 Claude 会话",
-                "请在 Claude 桌面端打开该会话后立即重试",
+                "交接已暂缓：无法读取 Claude 会话".to_owned(),
+                "请在 Claude 桌面端打开该会话后立即重试".to_owned(),
             )
         } else if dsh_read_failed {
             (
-                "交接已暂缓：无法读取 DSH 输出",
-                "请确认 DeepSeek Harness 正在运行后立即重试",
+                "交接已暂缓：无法读取 DSH 输出".to_owned(),
+                "请确认 DeepSeek Harness 正在运行后立即重试".to_owned(),
             )
         } else {
-            ("交接已暂缓：等待核验", "")
+            // The runtime will not resume one of these by itself: a reply that was ever
+            // cancelled is never auto-resent, so a deliberate click is the way on - and which
+            // click depends on which buttons are actually live. "来源或文案发生变化，未发送"
+            // on its own was a dead end for the reader.
+            (
+                "交接已暂缓：等待核验".to_owned(),
+                hold_hint(send_dsh, send_claude),
+            )
         };
         Banner {
             variant: Variant::Warn,
@@ -2220,9 +2253,56 @@ mod tests {
                 b.desc
             );
         }
-        // Every other hold keeps the bare code and adds nothing.
+        // Every other hold keeps the bare code, but still says how to get out of it.
         let other = hold("本次已停止：DRAFT_WRITE_UNVERIFIED");
-        assert!(other.desc.is_empty(), "got '{}'", other.desc);
+        assert!(
+            other.desc.contains("监听"),
+            "a hold must name a way out, got '{}'",
+            other.desc
+        );
+        assert!(!other.desc.contains("清空"), "got '{}'", other.desc);
+    }
+    /// A paused handoff must name the click that continues it.
+    ///
+    /// The runtime never resumes one of these by itself - a reply that was ever cancelled is
+    /// not auto-resent - so a pause whose banner only says "来源或文案发生变化，未发送" leaves the
+    /// reader with no idea that pressing 发送给 DSH is what moves things on.
+    #[test]
+    fn a_paused_handoff_says_which_click_continues_it() {
+        let paused = |dsh_running: Option<bool>, reply_turn: Option<u64>| {
+            let mut s = Snapshot::for_demo("running");
+            s.demo = None;
+            s.live = json!({"mode":"live","phase":"waiting_claude","sending":false,
+                "pending":null,"claude_ok":true,"dsh_ok":true,"enabled":true,
+                "status_text":"交接暂缓，等待核验",
+                "detail":"来源或文案发生变化，未发送",
+                "last_delivery":{"state":"cancelled","direction":"CLAUDE_TO_DSH"},
+                "next_poll_at_ms":0});
+            s.dsh_running = dsh_running;
+            s.reply_turn = reply_turn;
+            derive(&s, true, None, 1_000).banner
+        };
+        // Both directions have something to send: both are named.
+        let both = paused(Some(false), Some(40));
+        assert!(both.desc.contains("发送给 DSH"), "got '{}'", both.desc);
+        assert!(both.desc.contains("发送给 Claude"), "got '{}'", both.desc);
+        assert!(both.desc.contains("监听"), "got '{}'", both.desc);
+        // Only one side is sendable: the other must not be advertised.
+        let only_dsh = paused(Some(false), None);
+        assert!(
+            only_dsh.desc.contains("发送给 DSH"),
+            "got '{}'",
+            only_dsh.desc
+        );
+        assert!(
+            !only_dsh.desc.contains("发送给 Claude"),
+            "got '{}'",
+            only_dsh.desc
+        );
+        // Nothing is sendable: it must not promise a send that would be refused.
+        let neither = paused(Some(true), None);
+        assert!(neither.desc.contains("监听"), "got '{}'", neither.desc);
+        assert!(!neither.desc.contains("发送给"), "got '{}'", neither.desc);
     }
     /// A delivery held because the target input was occupied is still queued, so the same
     /// retry button must be offered there - that is the case with nothing else to press.
