@@ -77,7 +77,7 @@
 | 当前消息总数 | ✅ `ui_total_messages` | `:111` |
 | 当前是否生成中 | ✅ `state=='running'`（Stop 按钮探针） | `:66`、`:71` |
 | 是否处于会话尾部 | ✅ `tail_present` | `:65`、`:111` |
-| 当前回复是否完整 | ✅ `reply_available`（尾部 + "Claude finished the response" + 最终 Message actions 工具条） | `:68-71`、`:111` |
+| 当前回复是否完整 | ✅ `reply_available`（尾部 + 没有生成中指示/Stop 控件 + 最终 Message actions 工具条；Claude Desktop 2.19675 已不再渲染 "Claude finished the response" 字面标记，实测该标记缺失导致所有回复停在 `ui_state_unconfirmed`，工具完全无法转发） | `:66-78`、`:111` |
 | 最新 Claude 回复 | ✅ `reply_text`（需 `-IncludeReply` 且 state=replied） | `:112` |
 | 最新用户消息 | ⚠️ **只有 `latest_user_index` / `latest_user_hash` / `latest_user_body_hash`，没有正文** | `:111`（`:90` 读到的文本只用于哈希） |
 

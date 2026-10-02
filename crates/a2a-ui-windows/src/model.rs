@@ -140,6 +140,10 @@ pub fn save_bindings(product: &Path, b: &BindingConfig) -> Result<(), String> {
 pub struct Snapshot {
     pub claude_title: String,
     pub claude_session: String,
+    /// False when the runtime reports that it cannot identify the human's message in the Claude
+    /// conversation - after a Claude Desktop restart or an update changes its tree. The card says
+    /// so instead of leaving the reader to guess why nothing is being handed over.
+    pub claude_identity_known: bool,
     pub dsh_title: String,
     pub dsh_session: String,
     pub target_window: String,
@@ -190,6 +194,9 @@ impl Snapshot {
                 .map(|v| v.trim_end_matches(" - Claude").to_owned())
                 .unwrap_or(b.claude_title),
             claude_session: b.claude_session,
+            // Absent means an older runtime that never published it: say nothing rather than
+            // warn about a state it cannot report.
+            claude_identity_known: live["claude_identity_known"].as_bool().unwrap_or(true),
             target_window: b.claude_window,
             dsh_session: b.dsh_session,
             dsh_title: live["dsh_title"].as_str().unwrap_or("正在读取会话").into(),
@@ -239,6 +246,7 @@ impl Snapshot {
                 "静谧深空视觉优化设计".into()
             },
             claude_session: "demo-claude".into(),
+            claude_identity_known: true,
             dsh_title: if longtext {
                 task
             } else if reference {
@@ -415,6 +423,32 @@ mod tests {
         )
         .unwrap();
         assert_eq!(Snapshot::load(&d).claude_title, "Claude Desktop");
+        fs::remove_dir_all(d).unwrap();
+    }
+    /// The identity flag is the runtime's report, not the window's guess - and a runtime that
+    /// never published it must not make the card claim a problem it cannot know about.
+    #[test]
+    fn the_identity_flag_is_read_and_absent_means_quiet() {
+        let d = temporary();
+        fs::create_dir_all(d.join("runtime")).unwrap();
+        let state = r#"{"mode":"live","claude_ok":true,"claude_identity_known":false}"#;
+        fs::write(d.join("runtime/state.json"), state).unwrap();
+        assert!(!Snapshot::load(&d).claude_identity_known);
+        fs::write(
+            d.join("runtime/state.json"),
+            r#"{"mode":"live","claude_ok":true,"claude_identity_known":true}"#,
+        )
+        .unwrap();
+        assert!(Snapshot::load(&d).claude_identity_known);
+        fs::write(
+            d.join("runtime/state.json"),
+            r#"{"mode":"live","claude_ok":true}"#,
+        )
+        .unwrap();
+        assert!(
+            Snapshot::load(&d).claude_identity_known,
+            "an older runtime says nothing, so neither does the card"
+        );
         fs::remove_dir_all(d).unwrap();
     }
     #[test]

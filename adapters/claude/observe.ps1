@@ -66,9 +66,17 @@ try{
  $busy=@($all|Where-Object {$_.Current.ControlType -eq [Windows.Automation.ControlType]::Button -and $_.Current.IsEnabled -and -not $_.Current.IsOffscreen -and $_.Current.Name -match '^(Stop|Stop response|Stop responding|Stop task|Cancel task)$'}).Count -gt 0
  $needsInput=@($all|Where-Object {$_.Current.ControlType -eq [Windows.Automation.ControlType]::Button -and $_.Current.IsEnabled -and -not $_.Current.IsOffscreen -and $_.Current.Name -match '^(Allow once|Allow always|Approve|Deny)$'}).Count -gt 0
  $finished=@($all|Where-Object {$_.Current.ControlType -eq [Windows.Automation.ControlType]::Text -and $_.Current.Name -ceq 'Claude finished the response'}).Count -gt 0
+ # Claude Desktop 2.19675 no longer renders the literal "Claude finished the response" marker, so
+ # requiring it left every completed reply stuck at `ui_state_unconfirmed`: `reply_available` stayed
+ # false and the tool could not hand anything over at all (measured live - state unconfirmed while
+ # `busy` was false, the newest message was the assistant's and the tail was loaded). What the UI
+ # does expose is the opposite signal - a positive "generating" indicator and the Stop control -
+ # so completion is the absence of both, plus the assistant's message at the tail with its final
+ # toolbar. The literal is still accepted when a build renders it.
+ $responding=@($all|Where-Object {$_.Current.ControlType -eq [Windows.Automation.ControlType]::Text -and $_.Current.Name -match '^(Claude is responding|Claude is thinking|Claude is working)$'}).Count -gt 0
  $finalToolbar=@($last.Node.FindAll([Windows.Automation.TreeScope]::Descendants,(Condition ([Windows.Automation.ControlType]::ToolBar)))|Where-Object {$_.Current.Name -ceq 'Message actions'}).Count -gt 0
  $user=@($messages|Where-Object {$_.Role -eq 'user' -and $_.Index -lt $last.Index}|Select-Object -Last 1)
- $state=if($needsInput){'needs_input'}elseif($busy){'running'}elseif(-not $atTail){'ui_tail_unavailable'}elseif($last.Role -eq 'assistant' -and $finished -and $finalToolbar){'replied'}elseif($last.Role -eq 'user'){'awaiting_reply'}else{'ui_state_unconfirmed'}
+ $state=if($needsInput){'needs_input'}elseif($busy -or $responding){'running'}elseif(-not $atTail){'ui_tail_unavailable'}elseif($last.Role -eq 'assistant' -and $finalToolbar -and ($finished -or -not $responding)){'replied'}elseif($last.Role -eq 'user'){'awaiting_reply'}else{'ui_state_unconfirmed'}
  $reply='';$age=$null
  if($state -eq 'replied' -and $IncludeReply){
   $reply=Read-ResponseBody $last.Node $textPattern

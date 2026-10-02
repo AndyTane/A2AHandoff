@@ -358,9 +358,26 @@ fn manual_changed(w: &Value, d: &Value, c: &Value) -> bool {
     (yes(d, "ok")
         && (number(d, "user_seq") != number(w, "dsh_user_seq")
             || number(d, "last_question_answer_seq") > number(w, "dsh_answer_seq")))
-        || (yes(c, "ok")
+        || (claude_identity_known(c)
             && (number(c, "latest_user_index") != number(w, "claude_anchor_index")
                 || text(c, "latest_user_hash") != text(w, "claude_anchor_hash")))
+}
+/// Whether the Claude reader identified the human's message well enough to reason about
+/// ownership.
+///
+/// The reader mints `latest_user_index = 0` together with `latest_user_hash = ""` when its scan
+/// cannot identify a user message - after a Claude Desktop restart, while the conversation is
+/// still rendering, or when a new version changes the tree. Those sentinels are not a value: with
+/// them, "the newest user message is index 0" compares unequal to any real anchor, and a comparison
+/// against a sentinel anchor passes equally trivially. `message_index_scope` is
+/// `current_ui_snapshot`, so only an identity - never a bare position - makes a comparison across
+/// polls mean anything.
+///
+/// This is the discriminator `docs/MANUAL_INTERVENTION.md` calls "ownership cannot be proven":
+/// unreadable structure is not human activity (so it must not pause), and it is not proof of
+/// ownership either (so automation must not deliver on it).
+fn claude_identity_known(c: &Value) -> bool {
+    yes(c, "ok") && number(c, "latest_user_index") > 0 && !text(c, "latest_user_hash").is_empty()
 }
 /// Marks the source a pending carried as consumed, the way a `sent` receipt does.
 ///
@@ -624,7 +641,12 @@ fn candidate_for(
         return None;
     }
     let ds = d["result"]["reply"].as_str().filter(|s| {
-        !s.trim().is_empty() && number(&d["result"], "end_seq") > number(w, "dsh_after_seq")
+        // Handing a result to Claude needs the anchor the delivery is verified against. Without
+        // an identity for the human's message that anchor is a sentinel both sides agree on, so
+        // the correlation would pass without proving anything: hold instead of delivering.
+        claude_identity_known(c)
+            && !s.trim().is_empty()
+            && number(&d["result"], "end_seq") > number(w, "dsh_after_seq")
     });
     let cs = c["reply_text"].as_str().filter(|_| {
         text(w, "phase") == "waiting_claude"
@@ -634,7 +656,10 @@ fn candidate_for(
     if ds.is_none() && cs.is_none() {
         // Neither side offers anything. Report which condition failed on each side, so
         // a stuck click is diagnosable instead of collapsing into one sentence.
-        let dsh = if d["result"]["reply"].as_str().is_none() {
+        let dsh = if !claude_identity_known(c) {
+            // The result is ready, but the Claude side has no identity to anchor a delivery on.
+            "claude_identity_unknown"
+        } else if d["result"]["reply"].as_str().is_none() {
             "no_result"
         } else if number(&d["result"], "end_seq") <= number(w, "dsh_after_seq") {
             "result_consumed"
@@ -965,7 +990,7 @@ fn publish(
     };
     publish_state(
         root,
-        &json!({"schema":1,"mode":"live","pid":std::process::id(),"at_ms":now(),"enabled":enabled,"phase":phase,"sending":sending,"status_text":title,"detail":detail,"notice":w["notice"],"dsh_session":b["dsh_session"],"dsh_title":d["title"],"dsh_turn":d["turn"],"dsh_running":d["busy"],"dsh_ok":yes(d,"ok"),"claude_ok":yes(c,"ok"),"claude_state":c["state"],"claude_title":c["title"],"reply_turn":d["result"]["turn"],"goal":d["goal"],"last_delivery":w["last_delivery"],"next_poll_at_ms":next_poll_ms(),"pending":if p.is_null(){Value::Null}else{json!({"id":p["id"],"direction":p["direction"],"stage":p["stage"],"deadline_ms":p["deadline_ms"]})}}),
+        &json!({"schema":1,"mode":"live","pid":std::process::id(),"at_ms":now(),"enabled":enabled,"phase":phase,"sending":sending,"status_text":title,"detail":detail,"notice":w["notice"],"dsh_session":b["dsh_session"],"dsh_title":d["title"],"dsh_turn":d["turn"],"dsh_running":d["busy"],"dsh_ok":yes(d,"ok"),"claude_ok":yes(c,"ok"),"claude_state":c["state"],"claude_title":c["title"],"claude_identity_known":claude_identity_known(c),"reply_turn":d["result"]["turn"],"goal":d["goal"],"last_delivery":w["last_delivery"],"next_poll_at_ms":next_poll_ms(),"pending":if p.is_null(){Value::Null}else{json!({"id":p["id"],"direction":p["direction"],"stage":p["stage"],"deadline_ms":p["deadline_ms"]})}}),
     );
     Ok(())
 }
@@ -1437,7 +1462,17 @@ fn entry() -> Result<(), String> {
             diagnostic(
                 &home,
                 "manual_intervention",
-                &json!({"dsh_user_seq":d["user_seq"],"claude_user_index":c["latest_user_index"]}),
+                // The evidence, not only the numbers: the last false verdict could be explained
+                // only by reconstructing a Claude restart from process start times, because the
+                // event recorded an index and nothing about why the reader produced it.
+                &json!({"dsh_user_seq":d["user_seq"],
+                    "claude_user_index":c["latest_user_index"],
+                    "claude_user_hash":c["latest_user_hash"],
+                    "claude_state":c["state"],
+                    "claude_ui_message_index":c["ui_message_index"],
+                    "claude_identity_known":claude_identity_known(&c),
+                    "claude_anchor_index":w["claude_anchor_index"],
+                    "claude_anchor_hash":w["claude_anchor_hash"]}),
             );
         }
         if text(&w, "phase") == "waiting_claude"
@@ -2195,6 +2230,54 @@ mod live_tests {
         adopt(&mut w, &d, &c, "DSH_TO_CLAUDE");
         d["user_seq"] = json!(1001);
         assert!(manual_changed(&w, &d, &c));
+    }
+    /// The incident this rule was rewritten for: Claude Desktop restarted, its reader could not
+    /// identify the user message yet, and it reported that as `latest_user_index = 0` with an
+    /// empty hash while still saying `ok`. The runtime read "0 != the anchor" as human activity
+    /// and paused automatic handoff for hours, with nobody at the machine.
+    #[test]
+    fn an_unidentifiable_claude_read_is_not_human_activity() {
+        let (_, d, mut c, mut w) = fixture();
+        adopt(&mut w, &d, &c, "DSH_TO_CLAUDE");
+        c["latest_user_index"] = json!(0);
+        c["latest_user_hash"] = json!("");
+        assert!(!claude_identity_known(&c));
+        assert!(
+            !manual_changed(&w, &d, &c),
+            "a read that cannot identify the message is not a takeover"
+        );
+        // The DSH half is unaffected by the Claude reader, and still speaks for itself.
+        let mut d2 = d.clone();
+        d2["user_seq"] = json!(9999);
+        assert!(manual_changed(&w, &d2, &c));
+    }
+    /// Unprovable ownership is a hold, not a delivery: with a sentinel identity on both sides the
+    /// correlation check would compare "" with "" and pass without proving anything, so a result
+    /// waiting to go to Claude must stay where it is.
+    #[test]
+    fn a_result_is_held_while_the_claude_side_has_no_identity() {
+        let (b, d, mut c, mut w) = fixture();
+        // Waiting on DSH leaves exactly one candidate on offer - the finished result going to
+        // Claude - which is the delivery this test is about.
+        adopt(&mut w, &d, &c, "DSH_TO_CLAUDE");
+        c["latest_user_index"] = json!(0);
+        c["latest_user_hash"] = json!("");
+        w["claude_anchor_index"] = json!(0);
+        w["claude_anchor_hash"] = json!("");
+        assert!(
+            candidate(&MessageTemplates::default(), &w, &b, &d, &c, 10, false).is_none(),
+            "a delivery into Claude needs an identity to be verified against"
+        );
+        // The planner reports its own verdict here; the per-side reason above it
+        // (`dsh:claude_identity_unknown`) is what a refused click shows the user.
+        assert_eq!(
+            LAST_PLAN_REASON.with(|r| r.borrow().clone()),
+            "no_new_handoff"
+        );
+        // The same state with an identity hands the result over as usual.
+        c["latest_user_index"] = json!(5);
+        c["latest_user_hash"] = json!("human-hash");
+        assert!(candidate(&MessageTemplates::default(), &w, &b, &d, &c, 10, false).is_some());
     }
     #[test]
     fn cancelled_reply_does_not_requeue_after_restart() {

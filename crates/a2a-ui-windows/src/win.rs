@@ -1064,16 +1064,12 @@ impl App {
             | view::ID_TOGGLE
             | view::ID_RESTORE
             | view::ID_BANNER_RETRY
+            | view::ID_BANNER_POLL
             | view::ID_CANCEL
                 if !self.demo =>
             {
-                let command = match id {
-                    view::ID_SEND_DSH => "send_dsh",
-                    view::ID_SEND_CLAUDE => "send_claude",
-                    view::ID_TOGGLE => "toggle",
-                    view::ID_RESTORE => "restore_listener",
-                    view::ID_BANNER_RETRY => "retry_delivery",
-                    _ => "cancel",
+                let Some(command) = command_for(id) else {
+                    return;
                 };
                 match model::request_command(&self.product, command) {
                     // Only the handover of the click is known here; what the runtime does with it
@@ -1089,11 +1085,51 @@ impl App {
                     Err(e) => self.say(Variant::Error, "操作未提交", &e),
                 }
             }
-            // 重新核验 / 立即轮询: no backend command exists; the buttons are disabled.
+            // Everything else is a click on a painted area, or on one of the controls handled
+            // above (the stepper's ids, 保存间隔, 设置, 绑定配置, 诊断日志, 交接文案).
             _ => return,
         }
         self.rebuild(hwnd, false);
     }
+}
+/// The runtime command a click sends, or `None` when the id has no backend command.
+///
+/// This was an inline match whose catch-all answered `cancel`, and its arm list did not include
+/// the banner's poll button at all - so 立即轮询 was painted enabled in every state while the
+/// click fell through to the arm that does nothing, and the runtime's working `poll_now` had no
+/// caller. Naming the mapping once lets a test hold it against every button the view can paint.
+pub(crate) fn command_for(id: usize) -> Option<&'static str> {
+    Some(match id {
+        view::ID_SEND_DSH => "send_dsh",
+        view::ID_SEND_CLAUDE => "send_claude",
+        view::ID_TOGGLE => "toggle",
+        view::ID_RESTORE => "restore_listener",
+        view::ID_BANNER_RETRY => "retry_delivery",
+        view::ID_BANNER_POLL => "poll_now",
+        view::ID_CANCEL => "cancel",
+        _ => return None,
+    })
+}
+/// True when a click on this id reaches a handler at all - a runtime command, or one of the arms
+/// that open a dialog, the log folder or a settings window.
+///
+/// This is the invariant a painted button owes the user: something must happen. 立即轮询 was a
+/// click on an id that appeared in no arm, so the control the banner offered during a stall did
+/// nothing, in every state, for as long as it existed.
+pub(crate) fn handles_click(id: usize) -> bool {
+    command_for(id).is_some()
+        || matches!(
+            id,
+            view::ID_MINUS
+                | view::ID_PLUS
+                | view::ID_SAVE
+                | view::ID_BINDINGS
+                | view::ID_BANNER_BINDINGS
+                | view::ID_SETTINGS
+                | view::ID_TEMPLATES
+                | view::ID_LOGS
+                | view::ID_BANNER_LOGS
+        )
 }
 impl Drop for App {
     fn drop(&mut self) {
@@ -2765,6 +2801,45 @@ mod fit_tests {
         assert_eq!(respawn_delay(4), Duration::from_secs(120));
         assert_eq!(respawn_delay(9), Duration::from_secs(120));
         assert_eq!(respawn_delay(u32::MAX), Duration::from_secs(120));
+    }
+    /// The click-to-command mapping, including the poll button whose id used to be missing from
+    /// the dispatch, and the honest `None` for ids that are painted without a command.
+    #[test]
+    fn clicks_map_to_commands_and_nothing_else_does() {
+        for (id, expected) in [
+            (view::ID_SEND_DSH, "send_dsh"),
+            (view::ID_SEND_CLAUDE, "send_claude"),
+            (view::ID_TOGGLE, "toggle"),
+            (view::ID_RESTORE, "restore_listener"),
+            (view::ID_BANNER_RETRY, "retry_delivery"),
+            (view::ID_BANNER_POLL, "poll_now"),
+            (view::ID_CANCEL, "cancel"),
+        ] {
+            assert_eq!(command_for(id), Some(expected), "id {id}");
+        }
+        // The controls with their own handlers, and the value field, are not commands.
+        // The controls with their own handlers are reachable; the edit field is not a click, and
+        // an unknown id must not pretend to be one.
+        for id in [
+            view::ID_MINUS,
+            view::ID_PLUS,
+            view::ID_SAVE,
+            view::ID_SETTINGS,
+            view::ID_BINDINGS,
+            view::ID_BANNER_BINDINGS,
+            view::ID_LOGS,
+            view::ID_BANNER_LOGS,
+            view::ID_TEMPLATES,
+        ] {
+            assert!(
+                handles_click(id),
+                "id {id} is painted and handled elsewhere"
+            );
+            assert_eq!(command_for(id), None, "id {id} is not a runtime command");
+        }
+        for id in [view::ID_VALUE, 9999] {
+            assert!(!handles_click(id), "id {id} must not look handled");
+        }
     }
     /// A freshly unzipped package has no `runtime/config.json` - provisioning writes it, and
     /// provisioning needs the root - so the root must also be recognised by shape, or

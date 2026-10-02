@@ -816,6 +816,12 @@ pub fn derive(s: &Snapshot, watch_alive: bool, notice: Option<&Notice>, now: u64
     let dsh_read_failed = available && dsh_ok == Some(false);
     let claude_status = if !claude_bound {
         (Tone::Muted, "尚未绑定会话，请打开「绑定配置」".to_owned())
+    } else if !s.claude_identity_known {
+        // The reader sees the conversation but cannot identify the human's message - after a
+        // Claude Desktop restart, or an update that changed its tree. Nothing is handed over
+        // while that lasts, and the reason belongs on the card instead of in a guess: this state
+        // used to be reported as a read failure and, worse, read as a human takeover.
+        (Tone::Warn, "读不到对话结构，交接暂停".to_owned())
     } else if claude_read_failed {
         if demo_paused {
             (Tone::Warn, "绑定已保存，会话待核验".into())
@@ -1040,6 +1046,28 @@ pub fn derive(s: &Snapshot, watch_alive: bool, notice: Option<&Notice>, now: u64
             code: None,
             buttons: vec![],
         }
+    } else if phase == "paused_by_user" || demo == Some("manual") {
+        // Before the `auto_on` branch: the switch in the top bar reads the config, so with
+        // automatic handoff enabled a paused runtime was presented as the ordinary running
+        // banner - blue and calm - while the phase said the user had taken over.
+        let (t, d) = if demo == Some("manual") {
+            (
+                "你已接管 Claude 对话".to_owned(),
+                "自动交接暂停；讨论结束后，由你选择从哪条回复恢复。".to_owned(),
+            )
+        } else {
+            (
+                live_str(s, "status_text").to_owned(),
+                live_str(s, "detail").to_owned(),
+            )
+        };
+        Banner {
+            variant: Variant::Neutral,
+            title: t,
+            desc: d,
+            code: None,
+            buttons: vec![poll_button()],
+        }
     } else if auto_on {
         if phase == "idle" {
             Banner {
@@ -1064,7 +1092,7 @@ pub fn derive(s: &Snapshot, watch_alive: bool, notice: Option<&Notice>, now: u64
                 buttons: vec![poll_button()],
             }
         }
-    } else if matches!(phase.as_str(), "unclaimed" | "paused_by_user") || demo == Some("manual") {
+    } else if matches!(phase.as_str(), "unclaimed") || demo == Some("manual") {
         let (t, d) = if demo == Some("manual") {
             (
                 "你已接管 Claude 对话".to_owned(),
@@ -2543,6 +2571,95 @@ mod tests {
                 before,
                 "{name}: one id cannot place two controls: {ids:?}"
             );
+        }
+    }
+    /// The pause must not be painted as the ordinary running banner just because the config
+    /// switch is still on. That is how a paused tool looked healthy: the top bar said 自动交接 ON
+    /// and the banner was the calm blue one, so the only hint was a sentence in the detail line.
+    #[test]
+    fn a_paused_runtime_is_not_painted_as_running() {
+        let s = live(json!({"enabled":true,"phase":"paused_by_user",
+            "status_text":"自动交接已暂停 · 监听仍在",
+            "detail":"检测到人工介入；讨论结束后点击发送按钮重新接管。"}));
+        let ui = derive(&s, true, None, 1_000);
+        assert!(
+            ui.auto_on,
+            "the config switch is still on - that is the conflict"
+        );
+        assert_eq!(
+            ui.banner.variant,
+            Variant::Neutral,
+            "the pause is not the running banner"
+        );
+        assert!(ui.banner.title.contains("暂停"), "got {}", ui.banner.title);
+        assert!(
+            ui.banner.desc.contains("重新接管"),
+            "the way out stays visible: {}",
+            ui.banner.desc
+        );
+        assert_eq!(ui.listener, ListenerState::Paused);
+    }
+    /// While the reader cannot identify the human's message the card says so, and the tool keeps
+    /// observing: this is the state a Claude Desktop restart leaves behind, and it is not a
+    /// takeover.
+    #[test]
+    fn an_unreadable_conversation_structure_is_stated_on_the_card() {
+        let mut s = live(json!({}));
+        s.claude_identity_known = false;
+        let ui = derive(&s, true, None, 1_000);
+        assert_eq!(ui.claude_status.0, Tone::Warn);
+        assert!(
+            ui.claude_status.1.contains("读不到对话结构"),
+            "got {}",
+            ui.claude_status.1
+        );
+        assert_eq!(
+            ui.banner.variant,
+            Variant::Info,
+            "still waiting normally - not paused, not an error"
+        );
+        // With an identity the ordinary verified line is back.
+        s.claude_identity_known = true;
+        assert!(derive(&s, true, None, 1_000)
+            .claude_status
+            .1
+            .contains("已核验"));
+    }
+    /// Every button the banner paints must reach a runtime command. 立即轮询 was painted enabled
+    /// in every state while its id was missing from the click dispatch, so the one control the
+    /// banner offered during a stall did nothing at all - and `poll_now`, which the runtime has
+    /// always handled, had no caller in the window.
+    #[test]
+    fn every_banner_button_can_reach_the_runtime() {
+        let unbound = {
+            let mut s = live(json!({}));
+            s.claude_session = handoff_core::config::PLACEHOLDER_CLAUDE_SESSION.to_owned();
+            s.dsh_session = handoff_core::config::PLACEHOLDER_DSH_SESSION.to_owned();
+            s
+        };
+        let states: Vec<(&str, Snapshot)> = vec![
+            ("unbound", unbound),
+            ("waiting", live(json!({}))),
+            (
+                "held",
+                live(json!({"detail":"DRAFT_WRITE_FAILED",
+                    "last_delivery":{"state":"draft_unverified","direction":"DSH_TO_CLAUDE"}})),
+            ),
+            (
+                "read failed",
+                live(json!({"claude_ok":false,"detail":"TARGET_DOCUMENT_UNAVAILABLE: open"})),
+            ),
+        ];
+        for (name, s) in states {
+            let ui = derive(&s, true, None, 1_000);
+            for button in &ui.banner.buttons {
+                assert!(
+                    crate::win::handles_click(button.id),
+                    "{name}: 「{}」 is painted but reaches no handler (id {})",
+                    button.label,
+                    button.id
+                );
+            }
         }
     }
     /// What a first-run reader was shown instead: the raw adapter failure for the placeholder
