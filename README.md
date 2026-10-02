@@ -4,6 +4,20 @@ A2AHandoff is a local Windows handoff tool for coordinating **DeepSeek Harness (
 
 It watches the bound DSH session and Claude conversation, prepares the next cross-agent handoff, writes the outgoing draft into the destination input, gives the user a cancellable delay, and submits once when the evidence is still valid.
 
+## What it looks like
+
+![A2AHandoff passing a Claude reply to DeepSeek Harness](assets/demo-handoff.gif)
+
+Claude on the left, DeepSeek Harness on the right, and the handoff state between them. The desktop behind the window is pixelated in these captures; only the tool is shown. The interface is in Simplified Chinese today.
+
+![A2AHandoff holding a delivery it could not confirm](assets/demo-retry.gif)
+
+Delivery is fail-closed. When a submit cannot be verified, automatic retry stops, the retry button lights up, and the decision goes back to you.
+
+![The first version of the handoff tool](assets/early-ui.png)
+
+The first version: a PowerShell window that only sent when you clicked, and filled the result back once.
+
 ## Current status
 
 - Windows implementation: active.
